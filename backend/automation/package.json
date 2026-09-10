@@ -1,0 +1,12 @@
+{
+  "name": "zhiling-launcher-automation",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "node --check upload-agent-skills.mjs",
+    "test": "node verify-worker.mjs"
+  },
+  "dependencies": {
+    "playwright-core": "1.55.0"
+  }
+}

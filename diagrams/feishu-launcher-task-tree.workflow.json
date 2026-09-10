@@ -1,0 +1,76 @@
+{
+  "schema_version": 1,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "智灵启动器：按角色执行任务树",
+    "subtitle": "每条任务树串行执行；普通用户 Skills 初始化依赖租户管理员预置成功",
+    "output": "diagrams/feishu-launcher-task-tree.workflow.html"
+  },
+  "lanes": [
+    { "id": "admin", "label": "企业管理员任务树" },
+    { "id": "admin_executor", "label": "启动器：管理员编排" },
+    { "id": "user", "label": "普通用户任务树" },
+    { "id": "user_executor", "label": "启动器：用户编排" },
+    { "id": "exception", "label": "依赖未满足", "variant": "exception" }
+  ],
+  "phases": [
+    { "id": "knowledge", "label": "钉钉知识库同步", "fromCol": 0, "toCol": 2, "variant": "emphasis" },
+    { "id": "skills", "label": "Skills 预置或初始化", "fromCol": 3, "toCol": 5, "variant": "security" }
+  ],
+  "groups": [
+    { "id": "admin_chain", "label": "管理员串行执行", "lane": "admin_executor", "fromCol": 1, "toCol": 5, "variant": "emphasis" },
+    { "id": "user_chain", "label": "普通用户串行执行", "lane": "user_executor", "fromCol": 1, "toCol": 5, "variant": "emphasis" }
+  ],
+  "mainPath": ["admin_tree", "corp_knowledge", "upload_skills", "admin_done"],
+  "nodes": [
+    { "id": "admin_tree", "lane": "admin", "col": 0, "type": "frontend", "label": "管理员任务树", "sublabel": "已勾选的任务" },
+    { "id": "admin_done", "lane": "admin", "col": 5, "type": "database", "label": "管理员任务结束", "sublabel": "Skills 成为租户可用能力", "tag": "租户已预置" },
+    { "id": "corp_knowledge", "lane": "admin_executor", "col": 1, "type": "backend", "label": "同步企业知识库", "sublabel": "钉钉企业知识库 -> 飞书企业知识库" },
+    { "id": "upload_skills", "lane": "admin_executor", "col": 4, "type": "backend", "label": "上传 Skills", "sublabel": "浏览器插件自动操作飞书管理平台", "tag": "串行任务" },
+    { "id": "user_tree", "lane": "user", "col": 0, "type": "frontend", "label": "普通用户任务树", "sublabel": "已勾选的任务" },
+    { "id": "user_done", "lane": "user", "col": 5, "type": "database", "label": "用户任务结束", "sublabel": "个人知识库与 Agent 已就绪", "tag": "开箱即用" },
+    { "id": "personal_knowledge", "lane": "user_executor", "col": 1, "type": "backend", "label": "同步个人知识库", "sublabel": "钉钉个人知识库 -> 飞书个人知识库" },
+    { "id": "skills_precheck", "lane": "user_executor", "col": 3, "type": "security", "label": "校验租户技能", "sublabel": "仅允许管理员已预置的 Skills" },
+    { "id": "initialize_agent", "lane": "user_executor", "col": 5, "type": "backend", "label": "初始化 Agent", "sublabel": "在飞书豆包工作台运行选中 Skills" },
+    { "id": "blocked", "lane": "exception", "col": 3, "type": "security", "label": "阻塞用户初始化", "sublabel": "提示企业管理员先完成 Skills 预置", "tag": "不可越过" }
+  ],
+  "edges": [
+    { "from": "admin_tree", "to": "corp_knowledge", "variant": "emphasis", "fromSide": "bottom", "toSide": "top", "route": "drop" },
+    { "from": "corp_knowledge", "to": "upload_skills", "variant": "emphasis" },
+    { "from": "upload_skills", "to": "admin_done", "variant": "emphasis", "fromSide": "top", "toSide": "bottom", "route": "drop" },
+    { "from": "user_tree", "to": "personal_knowledge", "variant": "emphasis", "fromSide": "bottom", "toSide": "top", "route": "drop" },
+    { "from": "personal_knowledge", "to": "skills_precheck", "variant": "emphasis" },
+    { "from": "skills_precheck", "to": "initialize_agent", "label": "Skills 已预置", "variant": "emphasis" },
+    { "from": "initialize_agent", "to": "user_done", "variant": "emphasis", "fromSide": "top", "toSide": "bottom", "route": "drop" },
+    { "from": "skills_precheck", "to": "blocked", "label": "未预置", "variant": "security", "role": "error", "fromSide": "bottom", "toSide": "top", "route": "drop", "labelSegment": 1, "labelDy": 8 }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "管理员职责",
+      "items": [
+        "同步钉钉企业知识库到飞书企业知识库",
+        "通过浏览器插件在飞书企业管理平台上传 Skills",
+        "完成后将 Skills 标记为该租户可用"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "普通用户职责",
+      "items": [
+        "同步钉钉个人知识库到飞书个人知识库",
+        "仅可初始化该租户已经预置成功的 Skills",
+        "在飞书豆包工作台为当前用户运行选中 Skills"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "实现约束",
+      "items": [
+        "任务树节点需要幂等键、状态记录、重试和审计日志",
+        "浏览器插件不保存飞书会话凭据，只使用用户扫码后的会话",
+        "知识库同步需记录源文档、目标文档与增量同步游标"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,119 @@
+{
+  "schema_version": 1,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "智灵领航启动器：初始化任务流程",
+    "subtitle": "Vue 3 控制台驱动 Spring Boot 状态机，串联飞书资源、Skill、MCP 与 Agent 接入",
+    "output": "diagrams/launcher-initialization.workflow.html"
+  },
+  "lanes": [
+    { "id": "operator", "label": "交付人员" },
+    { "id": "frontend", "label": "Vue 3 前端" },
+    { "id": "platform", "label": "飞书 / MCP 平台" },
+    { "id": "approval", "label": "人工授权", "variant": "exception" },
+    { "id": "backend", "label": "Spring Boot 后端" },
+    { "id": "agent", "label": "Aily / 本地 Agent" },
+    { "id": "failures", "label": "失败与重试", "variant": "exception" },
+    { "id": "verification", "label": "自动验收" },
+    { "id": "observability", "label": "任务日志与审计" }
+  ],
+  "phases": [
+    { "id": "configure", "label": "配置任务", "fromCol": 0, "toCol": 1 },
+    { "id": "execute", "label": "执行初始化", "fromCol": 2, "toCol": 3, "variant": "emphasis" },
+    { "id": "authorize", "label": "授权与恢复", "fromCol": 4, "toCol": 4, "variant": "security" },
+    { "id": "verify", "label": "验收交付", "fromCol": 5, "toCol": 5, "variant": "dashed" }
+  ],
+  "groups": [
+    { "id": "execution_loop", "label": "状态机按步骤推进", "lane": "backend", "fromCol": 1, "toCol": 5, "variant": "emphasis" },
+    { "id": "authorization_gate", "label": "用户授权门禁", "lane": "approval", "fromCol": 3, "toCol": 5, "variant": "security" },
+    { "id": "retry_path", "label": "失败仅重试当前步骤", "lane": "failures", "fromCol": 3, "toCol": 5, "variant": "dashed" },
+    { "id": "audit_loop", "label": "每一步写入事件日志", "lane": "observability", "fromCol": 1, "toCol": 5, "variant": "dashed" }
+  ],
+  "mainPath": [
+    "open",
+    "configure",
+    "submit",
+    "create",
+    "preflight",
+    "identity",
+    "resources",
+    "skills",
+    "connector",
+    "wait",
+    "continue",
+    "agent",
+    "verify",
+    "success"
+  ],
+  "nodes": [
+    { "id": "open", "lane": "operator", "col": 0, "type": "external", "label": "打开控制台", "sublabel": "交付人员" },
+    { "id": "configure", "lane": "frontend", "col": 0, "type": "frontend", "label": "填写配置", "sublabel": "租户 / 执行人 / 范围" },
+    { "id": "submit", "lane": "frontend", "col": 1, "type": "frontend", "label": "提交任务", "sublabel": "POST /jobs", "tag": "用户操作" },
+    { "id": "create", "lane": "backend", "col": 1, "type": "backend", "label": "建任务", "sublabel": "生成 jobId", "width": 42 },
+    { "id": "preflight", "lane": "backend", "col": 2, "type": "backend", "label": "预检", "sublabel": "系统 / 网络 / 运行时", "width": 42 },
+    { "id": "identity", "lane": "platform", "col": 2, "type": "security", "label": "账号", "sublabel": "租户与用户授权", "width": 42 },
+    { "id": "resources", "lane": "platform", "col": 3, "type": "cloud", "label": "资源", "sublabel": "群 / 文件夹 / Base", "width": 42 },
+    { "id": "skills", "lane": "platform", "col": 4, "type": "cloud", "label": "Skill", "sublabel": "下载 + 校验", "width": 42 },
+    { "id": "connector", "lane": "platform", "col": 5, "type": "cloud", "label": "MCP", "sublabel": "安装到用户空间", "tag": "授权门禁", "width": 52 },
+    { "id": "wait", "lane": "approval", "col": 5, "type": "security", "label": "用户授权", "sublabel": "暂停任务", "tag": "NEEDS_USER_ACTION", "width": 66 },
+    { "id": "continue", "lane": "backend", "col": 5, "type": "backend", "label": "继续", "sublabel": "POST /continue", "width": 52 },
+    { "id": "agent", "lane": "agent", "col": 5, "type": "cloud", "label": "Agent", "sublabel": "Aily daemon + CLI", "width": 66 },
+    { "id": "verify", "lane": "verification", "col": 5, "type": "backend", "label": "验收", "sublabel": "资源 / Skill / Agent", "width": 52 },
+    { "id": "success", "lane": "frontend", "col": 5, "type": "frontend", "label": "完成", "sublabel": "100% + 可交付", "width": 52 },
+    { "id": "failure", "lane": "failures", "col": 4, "type": "security", "label": "失败", "sublabel": "超时 / 权限 / 网络", "width": 52 },
+    { "id": "retry", "lane": "failures", "col": 5, "type": "messagebus", "label": "重试", "sublabel": "保留已完成步骤", "width": 52 },
+    { "id": "audit_start", "lane": "observability", "col": 1, "type": "database", "label": "任务事件", "sublabel": "created / started", "width": 66 },
+    { "id": "audit_end", "lane": "observability", "col": 5, "type": "database", "label": "审计结果", "sublabel": "success / failure", "width": 66 }
+  ],
+  "edges": [
+    { "from": "open", "to": "configure", "variant": "emphasis" },
+    { "from": "configure", "to": "submit", "variant": "default" },
+    { "from": "submit", "to": "create", "label": "HTTP", "variant": "emphasis", "fromSide": "bottom", "toSide": "top", "route": "drop", "labelSegment": 1, "labelDy": 12 },
+    { "from": "create", "to": "preflight", "variant": "default", "route": "straight" },
+    { "from": "preflight", "to": "identity", "label": "平台适配器", "variant": "security", "fromSide": "bottom", "toSide": "top", "route": "drop", "labelSegment": 1, "labelDy": 12 },
+    { "from": "identity", "to": "resources", "variant": "default", "route": "straight" },
+    { "from": "resources", "to": "skills", "variant": "default", "route": "straight" },
+    { "from": "skills", "to": "connector", "variant": "default", "route": "straight" },
+    { "from": "connector", "to": "wait", "label": "用户确认", "variant": "security", "role": "branch", "fromSide": "bottom", "toSide": "top", "route": "drop", "labelSegment": 1, "labelDy": 10 },
+    { "from": "wait", "to": "continue", "label": "授权完成", "variant": "emphasis", "fromSide": "bottom", "toSide": "top", "route": "drop", "labelSegment": 1, "labelDy": 12 },
+    { "from": "continue", "to": "agent", "label": "启动运行时", "variant": "emphasis", "fromSide": "bottom", "toSide": "top", "route": "drop", "labelSegment": 1, "labelDy": 12 },
+    { "from": "agent", "to": "verify", "variant": "emphasis", "fromSide": "right", "toSide": "right", "route": "outside-right" },
+    { "from": "verify", "to": "success", "label": "验收通过", "variant": "emphasis", "fromSide": "top", "toSide": "bottom", "route": "outside-right", "labelSegment": 1 },
+    { "from": "agent", "to": "failure", "label": "连接失败", "variant": "security", "role": "error", "fromSide": "bottom", "toSide": "top", "route": "drop", "labelSegment": 1, "labelDy": 10 },
+    { "from": "failure", "to": "retry", "variant": "dashed", "role": "branch", "route": "straight" },
+    { "from": "retry", "to": "agent", "label": "再次连接", "variant": "dashed", "role": "return", "fromSide": "top", "toSide": "bottom", "route": "drop", "labelSegment": 1, "labelDy": 18 },
+    { "from": "audit_start", "to": "audit_end", "label": "追加状态变化", "variant": "dashed", "fromSide": "right", "toSide": "left", "route": "straight", "labelDy": -12 }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Demo 已覆盖",
+      "items": [
+        "Vue 3 表单与实时轮询",
+        "Spring Boot 内存状态机",
+        "MCP 授权暂停与继续",
+        "Agent 失败重试与验收"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "生产替换点",
+      "items": [
+        "平台资源适配器接飞书 API",
+        "Skill 安装器加入签名与回滚",
+        "MCP 自动化保留用户确认",
+        "任务状态迁移到持久化存储"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "关键约束",
+      "items": [
+        "每一步具备幂等键",
+        "失败只重跑当前步骤",
+        "人工授权是显式状态",
+        "日志记录每次状态迁移"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,70 @@
+{
+  "schema_version": 1,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "智灵启动器：登录、授权与角色分流",
+    "subtitle": "租户入驻与组织架构同步已由智灵中台管理员手动完成",
+    "output": "diagrams/feishu-launcher-entry.workflow.html"
+  },
+  "lanes": [
+    { "id": "prerequisite", "label": "已实现前置：智灵中台管理员" },
+    { "id": "admin", "label": "企业管理员" },
+    { "id": "launcher", "label": "智灵启动器" },
+    { "id": "feishu", "label": "飞书身份与工作台" },
+    { "id": "user", "label": "企业普通用户" }
+  ],
+  "phases": [
+    { "id": "ready", "label": "租户已就绪", "fromCol": 0, "toCol": 2, "variant": "dashed" },
+    { "id": "select", "label": "任务选择", "fromCol": 2, "toCol": 3, "variant": "emphasis" },
+    { "id": "auth", "label": "飞书会话校验", "fromCol": 4, "toCol": 5, "variant": "security" }
+  ],
+  "groups": [
+    { "id": "launch", "label": "统一启动入口", "lane": "launcher", "fromCol": 3, "toCol": 5, "variant": "emphasis" }
+  ],
+  "nodes": [
+    { "id": "tenant_registered", "lane": "prerequisite", "col": 0, "type": "backend", "label": "注册企业租户", "sublabel": "中台管理员手动操作", "tag": "默认已完成" },
+    { "id": "org_synced", "lane": "prerequisite", "col": 2, "type": "database", "label": "同步组织架构", "sublabel": "企业人员进入中台用户体系", "tag": "默认已完成" },
+    { "id": "admin_login", "lane": "admin", "col": 0, "type": "frontend", "label": "管理员登录中台", "sublabel": "企业管理员身份" },
+    { "id": "admin_select", "lane": "admin", "col": 2, "type": "frontend", "label": "勾选启动任务", "sublabel": "企业知识库同步 / Skills" },
+    { "id": "admin_scan", "lane": "admin", "col": 4, "type": "security", "label": "扫码登录飞书", "sublabel": "仅无有效会话时" },
+    { "id": "submit", "lane": "launcher", "col": 3, "type": "backend", "label": "启动器提交", "sublabel": "保存角色与任务范围" },
+    { "id": "task_tree", "lane": "launcher", "col": 5, "type": "messagebus", "label": "生成执行任务树", "sublabel": "按角色串行执行", "tag": "可观测状态" },
+    { "id": "session_check", "lane": "feishu", "col": 4, "type": "security", "label": "校验飞书会话", "sublabel": "企业管理工作台或用户工作台" },
+    { "id": "user_login", "lane": "user", "col": 0, "type": "frontend", "label": "用户登录中台", "sublabel": "已同步的企业用户" },
+    { "id": "user_select", "lane": "user", "col": 2, "type": "frontend", "label": "勾选启动任务", "sublabel": "个人知识库同步 / Skills" },
+    { "id": "user_scan", "lane": "user", "col": 4, "type": "security", "label": "扫码登录飞书", "sublabel": "仅无有效会话时" }
+  ],
+  "edges": [
+    { "from": "tenant_registered", "to": "org_synced", "variant": "dashed" },
+    { "from": "admin_login", "to": "admin_select", "variant": "emphasis" },
+    { "from": "admin_select", "to": "submit", "label": "管理员任务", "variant": "emphasis", "fromSide": "bottom", "toSide": "top", "route": "drop", "labelSegment": 1 },
+    { "from": "user_login", "to": "user_select", "variant": "emphasis" },
+    { "from": "user_select", "to": "submit", "label": "用户任务", "variant": "emphasis", "fromSide": "top", "toSide": "bottom", "route": "up-channel", "labelSegment": 1 },
+    { "from": "submit", "to": "session_check", "label": "读取当前身份", "variant": "security", "fromSide": "bottom", "toSide": "left", "route": "drop", "labelSegment": 1, "labelDy": 8 },
+    { "from": "session_check", "to": "task_tree", "label": "已有会话", "variant": "emphasis", "labelDy": 11 },
+    { "from": "session_check", "to": "admin_scan", "label": "管理员未登录", "variant": "security", "role": "branch", "fromSide": "top", "toSide": "bottom", "route": "straight", "labelDx": -62 },
+    { "from": "admin_scan", "to": "task_tree", "label": "登录成功", "variant": "emphasis", "fromSide": "right", "toSide": "top", "route": "drop", "labelSegment": 1 },
+    { "from": "session_check", "to": "user_scan", "label": "用户未登录", "variant": "security", "role": "branch", "fromSide": "bottom", "toSide": "top", "route": "straight", "labelDx": -52, "labelDy": 24 },
+    { "from": "user_scan", "to": "task_tree", "label": "登录成功", "variant": "emphasis", "fromSide": "right", "toSide": "right", "route": "outside-right", "labelSegment": 1 }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "启动器输入",
+      "items": [
+        "当前中台用户身份：企业管理员或普通用户",
+        "勾选任务：钉钉知识库同步、Agent Skills",
+        "租户、飞书组织和人员映射不由启动器创建"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "授权边界",
+      "items": [
+        "会话不存在时展示飞书登录二维码",
+        "管理员使用企业管理工作台会话",
+        "普通用户使用个人飞书工作台会话"
+      ]
+    }
+  ]
+}

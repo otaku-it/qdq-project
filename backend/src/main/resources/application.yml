@@ -1,0 +1,22 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: launcher-demo
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+
+launcher:
+  step-delay-ms: 850
+  skill-upload:
+    # mock 仅演示编排；playwright 会真实上传到豆包企业后台。
+    mode: ${LAUNCHER_SKILL_UPLOAD_MODE:mock}
+    node-command: ${LAUNCHER_NODE_COMMAND:node}
+    worker-script: ${LAUNCHER_SKILL_WORKER:automation/upload-agent-skills.mjs}
+    package-directory: ${LAUNCHER_SKILL_PACKAGE_DIR:skills}
+    timeout-seconds: ${LAUNCHER_SKILL_UPLOAD_TIMEOUT_SECONDS:120}

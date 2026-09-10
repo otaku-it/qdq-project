@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "AI PM Agent 开箱即用开通流程",
+    "subtitle": "租户级能力预置 + 用户级智能体挂载",
+    "output": "diagrams/ai-pm-agent-enablement.workflow.html"
+  },
+  "lanes": [
+    { "id": "platform", "label": "智灵开通平台" },
+    { "id": "admin", "label": "租户管理员" },
+    { "id": "delivery", "label": "验收与交付" }
+  ],
+  "phases": [
+    { "id": "tenant", "label": "租户级预置", "fromCol": 0, "toCol": 4, "variant": "emphasis" },
+    { "id": "user", "label": "用户级挂载", "fromCol": 5, "toCol": 5, "variant": "security" }
+  ],
+  "groups": [
+    { "id": "tenant_bundle", "label": "租户能力包", "lane": "platform", "fromCol": 0, "toCol": 4, "variant": "emphasis" }
+  ],
+  "nodes": [
+    { "id": "tenant_open", "lane": "platform", "col": 0, "type": "backend", "label": "智灵租户开通", "sublabel": "客户租户 + 飞书映射" },
+    { "id": "skills", "lane": "platform", "col": 2, "type": "cloud", "label": "AI PM Skills", "sublabel": "项目、需求、风险" },
+    { "id": "connector", "lane": "platform", "col": 4, "type": "messagebus", "label": "MCP 连接器", "sublabel": "租户数据源", "tag": "需授权" },
+    { "id": "authorization", "lane": "admin", "col": 5, "type": "security", "label": "确认数据范围", "sublabel": "飞书授权页" },
+    { "id": "agent_bind", "lane": "platform", "col": 5, "type": "frontend", "label": "AI PM Agent", "sublabel": "绑定目标飞书用户" },
+    { "id": "acceptance", "lane": "delivery", "col": 4, "type": "database", "label": "租户+用户验收", "sublabel": "能力可用 + 绑定生效", "tag": "开箱即用" }
+  ],
+  "edges": [
+    { "from": "tenant_open", "to": "skills", "variant": "emphasis" },
+    { "from": "skills", "to": "connector", "variant": "emphasis" },
+    { "from": "connector", "to": "authorization", "label": "租户管理员授权", "variant": "security", "fromSide": "right", "toSide": "top", "route": "drop", "labelSegment": 1, "labelDy": 10 },
+    { "from": "authorization", "to": "agent_bind", "label": "授权回调", "variant": "emphasis", "fromSide": "top", "toSide": "bottom", "route": "straight", "labelDy": -8 },
+    { "from": "agent_bind", "to": "acceptance", "variant": "emphasis", "fromSide": "right", "toSide": "right", "route": "outside-right" }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "租户级能力",
+      "items": [
+        "租户、管理员与飞书账号映射",
+        "AI PM Skills 标准包预置",
+        "MCP 连接器按租户授权"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "用户级交付",
+      "items": [
+        "将 AI PM Agent 挂载到指定飞书用户",
+        "验收能力可用和用户绑定生效",
+        "失败仅重试当前步骤，前序结果保持"
+      ]
+    }
+  ]
+}

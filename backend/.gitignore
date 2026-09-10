@@ -1,0 +1,6 @@
+target/
+.mvn/apache-maven-*/
+.mvn/*.tar.gz
+*.log
+automation/node_modules/
+.doubao-profile/
