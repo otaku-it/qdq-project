@@ -1,6 +1,7 @@
 package com.zhiling.launcher.service;
 
 import com.zhiling.launcher.adapter.AgentSkillUploadAdapter;
+import com.zhiling.launcher.adapter.DoubaoAgentInitializationAdapter;
 import com.zhiling.launcher.api.CreateJobRequest;
 import com.zhiling.launcher.api.LauncherViews.JobView;
 import org.junit.jupiter.api.AfterEach;
@@ -160,6 +161,123 @@ class LauncherJobServiceTest {
         } finally {
             loginService.shutdown();
         }
+    }
+
+    @Test
+    void recordsPlaywrightDoubaoInitializationResult() throws Exception {
+        AgentSkillUploadAdapter uploadAdapter = request -> new AgentSkillUploadAdapter.UploadResult(
+                true, false, "PLAYWRIGHT", "管理员预置成功", request.skillIds()
+        );
+        DoubaoAgentInitializationAdapter initializationAdapter = request ->
+                new DoubaoAgentInitializationAdapter.InitializationResult(
+                        true,
+                        false,
+                        "PLAYWRIGHT",
+                        "已创建豆包工作任务：https://www.doubao.com/chat/task-1",
+                        request.skillIds(),
+                        "https://www.doubao.com/chat/task-1"
+                );
+        LauncherJobService playwrightService = new LauncherJobService(10, uploadAdapter, initializationAdapter);
+        try {
+            preloadTenantSkill(playwrightService, "Playwright 租户", "project-plan");
+            JobView user = playwrightService.create(new CreateJobRequest(
+                    "Playwright 租户", "普通用户", "USER", "普通用户",
+                    List.of("agent-skills"), List.of("project-plan"), false
+            ));
+            awaitStatus(playwrightService, user.id(), "NEEDS_USER_ACTION", Duration.ofSeconds(2));
+            playwrightService.continueJob(user.id());
+            JobView completed = awaitStatus(playwrightService, user.id(), "SUCCEEDED", Duration.ofSeconds(2));
+
+            assertThat(completed.steps()).anyMatch(step -> step.id().equals("doubao-initialization")
+                    && step.status().equals("SUCCEEDED")
+                    && "PLAYWRIGHT".equals(step.executionMode())
+                    && step.resultMessage().contains("/chat/task-1"));
+        } finally {
+            playwrightService.shutdown();
+        }
+    }
+
+    @Test
+    void waitsForLoginAndRetriesSameDoubaoInitializationStep() throws Exception {
+        int[] attempts = {0};
+        String[] idempotencyKeys = {null, null};
+        AgentSkillUploadAdapter uploadAdapter = request -> new AgentSkillUploadAdapter.UploadResult(
+                true, false, "PLAYWRIGHT", "管理员预置成功", request.skillIds()
+        );
+        DoubaoAgentInitializationAdapter initializationAdapter = request -> {
+            idempotencyKeys[attempts[0]] = request.idempotencyKey();
+            attempts[0]++;
+            if (attempts[0] == 1) {
+                return DoubaoAgentInitializationAdapter.InitializationResult.waitingForLogin(
+                        "PLAYWRIGHT", "请完成豆包扫码登录后继续"
+                );
+            }
+            return new DoubaoAgentInitializationAdapter.InitializationResult(
+                    true, false, "PLAYWRIGHT", "登录后初始化成功",
+                    request.skillIds(), "https://www.doubao.com/chat/task-2"
+            );
+        };
+        LauncherJobService loginService = new LauncherJobService(10, uploadAdapter, initializationAdapter);
+        try {
+            preloadTenantSkill(loginService, "初始化登录租户", "project-plan");
+            JobView user = loginService.create(new CreateJobRequest(
+                    "初始化登录租户", "普通用户", "USER", "普通用户",
+                    List.of("agent-skills"), List.of("project-plan"), false
+            ));
+            awaitStatus(loginService, user.id(), "NEEDS_USER_ACTION", Duration.ofSeconds(2));
+            loginService.continueJob(user.id());
+            JobView waitingAgain = awaitStatus(loginService, user.id(), "NEEDS_USER_ACTION", Duration.ofSeconds(2));
+            assertThat(waitingAgain.steps()).anyMatch(step -> step.id().equals("doubao-initialization")
+                    && step.status().equals("WAITING_USER"));
+
+            loginService.continueJob(user.id());
+            JobView completed = awaitStatus(loginService, user.id(), "SUCCEEDED", Duration.ofSeconds(2));
+            assertThat(completed.steps()).anyMatch(step -> step.id().equals("doubao-initialization")
+                    && step.status().equals("SUCCEEDED"));
+            assertThat(attempts[0]).isEqualTo(2);
+            assertThat(idempotencyKeys[0]).isEqualTo(idempotencyKeys[1]);
+        } finally {
+            loginService.shutdown();
+        }
+    }
+
+    @Test
+    void failsJobWhenDoubaoInitializationCannotFindEnterpriseSkill() throws Exception {
+        AgentSkillUploadAdapter uploadAdapter = request -> new AgentSkillUploadAdapter.UploadResult(
+                true, false, "PLAYWRIGHT", "管理员预置成功", request.skillIds()
+        );
+        DoubaoAgentInitializationAdapter initializationAdapter = request ->
+                DoubaoAgentInitializationAdapter.InitializationResult.failed(
+                        "PLAYWRIGHT", "豆包企业技能分组中未找到 project-plan"
+                );
+        LauncherJobService failingService = new LauncherJobService(10, uploadAdapter, initializationAdapter);
+        try {
+            preloadTenantSkill(failingService, "初始化失败租户", "project-plan");
+            JobView user = failingService.create(new CreateJobRequest(
+                    "初始化失败租户", "普通用户", "USER", "普通用户",
+                    List.of("agent-skills"), List.of("project-plan"), false
+            ));
+            awaitStatus(failingService, user.id(), "NEEDS_USER_ACTION", Duration.ofSeconds(2));
+            failingService.continueJob(user.id());
+            JobView failed = awaitStatus(failingService, user.id(), "FAILED", Duration.ofSeconds(2));
+
+            assertThat(failed.currentAction()).contains("未找到 project-plan");
+            assertThat(failed.steps()).anyMatch(step -> step.id().equals("doubao-initialization")
+                    && step.status().equals("FAILED")
+                    && "PLAYWRIGHT".equals(step.executionMode()));
+        } finally {
+            failingService.shutdown();
+        }
+    }
+
+    private void preloadTenantSkill(LauncherJobService targetService, String tenantName, String skillId) throws Exception {
+        JobView admin = targetService.create(new CreateJobRequest(
+                tenantName, "管理员", "ADMIN", "管理员",
+                List.of("agent-skills"), List.of(skillId), false
+        ));
+        awaitStatus(targetService, admin.id(), "NEEDS_USER_ACTION", Duration.ofSeconds(2));
+        targetService.continueJob(admin.id());
+        awaitStatus(targetService, admin.id(), "SUCCEEDED", Duration.ofSeconds(2));
     }
 
     private JobView awaitStatus(String id, String expectedStatus, Duration timeout) throws Exception {

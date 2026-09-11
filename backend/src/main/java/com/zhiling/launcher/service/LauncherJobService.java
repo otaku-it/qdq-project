@@ -3,7 +3,11 @@ package com.zhiling.launcher.service;
 import com.zhiling.launcher.adapter.AgentSkillUploadAdapter;
 import com.zhiling.launcher.adapter.AgentSkillUploadAdapter.UploadRequest;
 import com.zhiling.launcher.adapter.AgentSkillUploadAdapter.UploadResult;
+import com.zhiling.launcher.adapter.DoubaoAgentInitializationAdapter;
+import com.zhiling.launcher.adapter.DoubaoAgentInitializationAdapter.InitializationRequest;
+import com.zhiling.launcher.adapter.DoubaoAgentInitializationAdapter.InitializationResult;
 import com.zhiling.launcher.adapter.SimulatedAgentSkillUploadAdapter;
+import com.zhiling.launcher.adapter.SimulatedDoubaoAgentInitializationAdapter;
 import com.zhiling.launcher.api.CreateJobRequest;
 import com.zhiling.launcher.api.LauncherViews.BlueprintView;
 import com.zhiling.launcher.api.LauncherViews.DeliveryView;
@@ -67,19 +71,27 @@ public class LauncherJobService {
     private final ScheduledExecutorService executor = Executors.newScheduledThreadPool(2);
     private final long stepDelayMs;
     private final AgentSkillUploadAdapter skillUploadAdapter;
+    private final DoubaoAgentInitializationAdapter agentInitializationAdapter;
 
     @Autowired
     public LauncherJobService(
             @Value("${launcher.step-delay-ms:850}") long stepDelayMs,
-            AgentSkillUploadAdapter skillUploadAdapter
+            AgentSkillUploadAdapter skillUploadAdapter,
+            DoubaoAgentInitializationAdapter agentInitializationAdapter
     ) {
         this.stepDelayMs = stepDelayMs;
         this.skillUploadAdapter = skillUploadAdapter;
+        this.agentInitializationAdapter = agentInitializationAdapter;
     }
 
     /** 测试和纯 Java Demo 使用的便捷构造器，执行结果会明确标记为 SIMULATED。 */
     LauncherJobService(long stepDelayMs) {
-        this(stepDelayMs, new SimulatedAgentSkillUploadAdapter());
+        this(stepDelayMs, new SimulatedAgentSkillUploadAdapter(), new SimulatedDoubaoAgentInitializationAdapter());
+    }
+
+    /** 保留原有上传适配器测试入口，普通用户初始化仍使用模拟实现。 */
+    LauncherJobService(long stepDelayMs, AgentSkillUploadAdapter skillUploadAdapter) {
+        this(stepDelayMs, skillUploadAdapter, new SimulatedDoubaoAgentInitializationAdapter());
     }
 
     /** 返回页面可勾选的任务和 Skills，不返回任何飞书凭据。 */
@@ -139,10 +151,13 @@ public class LauncherJobService {
             job.status = JobStatus.RUNNING;
             job.currentAction = null;
             job.updatedAt = now;
-            if (waiting.id.equals("skills-upload")) {
+            if (isBrowserAutomationStep(waiting)) {
                 waiting.status = StepStatus.RUNNING;
                 waiting.startedAt = now;
-                job.events.add(new EventView(now, "success", "飞书浏览器登录已确认，重新执行 Agent Skills 上传"));
+                String action = waiting.id.equals("skills-upload")
+                        ? "重新执行 Agent Skills 上传"
+                        : "重新执行豆包 Agent 初始化";
+                job.events.add(new EventView(now, "success", "飞书浏览器登录已确认，" + action));
                 shouldSchedule = true;
             } else {
                 waiting.status = StepStatus.SUCCEEDED;
@@ -193,6 +208,7 @@ public class LauncherJobService {
         }
         boolean shouldSchedule = false;
         MutableStep uploadStep = null;
+        MutableStep initializationStep = null;
         synchronized (job) {
             if (job.status != JobStatus.RUNNING) {
                 return;
@@ -223,6 +239,9 @@ public class LauncherJobService {
             if (running.id.equals("skills-upload")) {
                 // 浏览器任务可能持续数十秒。离开 job 锁后执行，保证前端轮询仍能读取“执行中”状态。
                 uploadStep = running;
+            } else if (running.id.equals("doubao-initialization")) {
+                // 普通用户初始化同样需要离开 job 锁，避免 Playwright 执行期间阻塞状态查询。
+                initializationStep = running;
             } else {
                 completeStep(job, running, now);
                 shouldSchedule = startNextStep(job);
@@ -267,6 +286,45 @@ public class LauncherJobService {
                 shouldSchedule = startNextStep(job);
             }
         }
+        if (initializationStep != null) {
+            InitializationResult result = agentInitializationAdapter.initialize(new InitializationRequest(
+                    job.tenantName,
+                    job.operatorName,
+                    job.larkUser,
+                    job.id,
+                    job.selectedSkills
+            ));
+            synchronized (job) {
+                if (job.status != JobStatus.RUNNING || initializationStep.status != StepStatus.RUNNING) {
+                    return;
+                }
+                Instant now = Instant.now();
+                initializationStep.executionMode = result.mode();
+                initializationStep.resultMessage = result.message();
+                if (result.requiresUserAction()) {
+                    initializationStep.status = StepStatus.WAITING_USER;
+                    job.status = JobStatus.NEEDS_USER_ACTION;
+                    job.currentAction = result.message();
+                    job.updatedAt = now;
+                    job.events.add(new EventView(now, "warning", result.message()));
+                    return;
+                }
+                if (!result.success() || !result.initializedSkillIds().containsAll(job.selectedSkills)) {
+                    initializationStep.status = StepStatus.FAILED;
+                    initializationStep.completedAt = now;
+                    job.status = JobStatus.FAILED;
+                    job.currentAction = result.message();
+                    job.updatedAt = now;
+                    job.events.add(new EventView(now, "error", "初始化豆包 Agent 失败：" + result.message()));
+                    return;
+                }
+
+                String eventLevel = "SIMULATED".equals(result.mode()) ? "warning" : "success";
+                job.events.add(new EventView(now, eventLevel, result.message()));
+                completeStep(job, initializationStep, now);
+                shouldSchedule = startNextStep(job);
+            }
+        }
         if (shouldSchedule) {
             scheduleAdvance(id);
         }
@@ -302,9 +360,11 @@ public class LauncherJobService {
         }
 
         next.status = StepStatus.RUNNING;
-        String message = next.id.equals("skills-upload")
-                ? "开始执行：" + next.title + "，正在调用技能上传适配器"
-                : "开始执行：" + next.title;
+        String message = switch (next.id) {
+            case "skills-upload" -> "开始执行：" + next.title + "，正在调用技能上传适配器";
+            case "doubao-initialization" -> "开始执行：" + next.title + "，正在创建豆包工作任务";
+            default -> "开始执行：" + next.title;
+        };
         job.events.add(new EventView(now, "info", message));
         updateProgress(job);
         return true;
@@ -374,6 +434,10 @@ public class LauncherJobService {
 
     private boolean areSkillsPreloaded(MutableJob job) {
         return tenantSkills.getOrDefault(tenantKey(job.tenantName), Set.of()).containsAll(job.selectedSkills);
+    }
+
+    private boolean isBrowserAutomationStep(MutableStep step) {
+        return step.id.equals("skills-upload") || step.id.equals("doubao-initialization");
     }
 
     private List<String> skillNames(List<String> ids) {

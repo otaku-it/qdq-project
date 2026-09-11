@@ -39,12 +39,12 @@ npm run dev
 - `POST /api/v1/launcher/jobs/{id}/continue`：完成用户授权后继续。
 - `POST /api/v1/launcher/jobs/{id}/retry`：重试失败步骤。
 
-当前后端仍使用内存任务仓库，但 Agent Skills 已提供 `mock` 和 `playwright` 两种上传适配器。接入真实环境时，应以持久化任务和幂等键替换内存状态，并按以下边界实现适配器：
+当前后端仍使用内存任务仓库，但管理员 Skills 上传和普通用户豆包 Agent 初始化都已提供相互独立的 `mock`、`playwright` 适配器。接入真实环境时，应以持久化任务和幂等键替换内存状态，并按以下边界实现适配器：
 
 - 飞书登录：后端生成一次性二维码，并以扫码回调更新任务状态；不要在浏览器或日志中固化会话凭据。
 - 钉钉/飞书知识库同步：记录源文档、目标文档、同步游标、版本冲突和失败重试信息。
 - Skills 上传：Playwright Worker 在受控登录会话中进入豆包企业管理后台“内置技能管理”，上传根目录包含 `SKILL.md` 的 `.skill` 文件，并在列表中按 Skill ID 验证回显。只有真实回显成功后才写入租户级 Skills 目录。
-- 普通用户初始化：校验 `tenant_id + skill_id + version` 已预置，再调用豆包工作台的初始化适配器。
+- 普通用户初始化：校验 `tenant_id + skill_id + version` 已预置，再由 Playwright 打开“新工作任务”，从“企业”分组挂载选中的 Skills，发送带任务幂等键的初始化消息，并以新任务 URL 和消息回显作为成功依据。
 - 任务运行：将 `LauncherJobService` 的内存状态替换为持久化任务、幂等键、审计日志和可恢复的工作队列。
 
 ## 开启 Playwright 真实上传
@@ -78,4 +78,28 @@ export DOUBAO_CDP_ENDPOINT=http://127.0.0.1:9222
 
 豆包后台入口和 DOM 选择器集中在 `backend/automation/upload-agent-skills.mjs`。如果页面改版，只需调整 Worker，不影响 Spring Boot 编排接口。
 
+管理员授权页由 Worker 保证单实例：已有有效飞书授权页时直接复用，同一受控浏览器中多余的授权页会自动关闭；二维码过期后，再次继续任务会关闭过期页并生成一个新授权页。扫码等待期间 Worker 会返回 `NEEDS_USER_ACTION`，不会持续占用 120 秒上传超时。`LAUNCHER_SKILL_UPLOAD_TIMEOUT_SECONDS` 仅约束扫码成功后的页面操作和上传执行时间。
+
 官方飞书 Aily OpenAPI 当前提供技能调用、技能信息和技能列表查询，但官方公开文档中未找到“将本地 SKILL.md 上传到豆包企业提供栏”的接口。因此现阶段 Playwright 适合做技术验证；若后续开放正式上传 API，应新增 API Adapter 并优先替换 UI 自动化。
+
+## 开启普通用户豆包 Agent 真实初始化
+
+普通用户初始化与管理员上传是两个独立开关。只开启初始化不会改变管理员上传行为：
+
+```bash
+cd backend
+export LAUNCHER_AGENT_INITIALIZATION_MODE=playwright
+export DOUBAO_USER_DATA_DIR="$PWD/.doubao-profile"
+./mvnw spring-boot:run
+```
+
+连接已通过远程调试端口启动的 Chrome 时：
+
+```bash
+cd backend
+export LAUNCHER_AGENT_INITIALIZATION_MODE=playwright
+export DOUBAO_CDP_ENDPOINT=http://127.0.0.1:9222
+./mvnw spring-boot:run
+```
+
+Worker 位于 `backend/automation/initialize-doubao-agent.mjs`。它只选择“企业”分组中的 Skill，支持一次挂载多个 Skill；浏览器关闭或登录失效时，任务进入 `NEEDS_USER_ACTION`，用户重新登录后可从同一节点继续。成功结果按启动器任务 ID 做进程内幂等缓存，生产环境应改为数据库唯一键和任务回执表。

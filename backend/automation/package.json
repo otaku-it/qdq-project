@@ -3,8 +3,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "check": "node --check upload-agent-skills.mjs",
-    "test": "node verify-worker.mjs"
+    "check": "node --check upload-agent-skills.mjs && node --check initialize-doubao-agent.mjs",
+    "test": "node verify-worker.mjs && node verify-initialization-worker.mjs"
   },
   "dependencies": {
     "playwright-core": "1.55.0"

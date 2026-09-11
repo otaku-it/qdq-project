@@ -4,6 +4,7 @@ import { resolve } from 'node:path'
 const ADMIN_URL = process.env.DOUBAO_ADMIN_URL || 'https://admin.doubao.com/ask/doubao/builtin-skill'
 const CDP_ENDPOINT = process.env.DOUBAO_CDP_ENDPOINT
 const USER_DATA_DIR = process.env.DOUBAO_USER_DATA_DIR || resolve(process.cwd(), '.doubao-profile')
+const AUTHORIZATION_WAIT_MS = Number(process.env.DOUBAO_AUTHORIZATION_WAIT_MS || 45_000)
 
 async function readPayload() {
   const chunks = []
@@ -55,13 +56,95 @@ async function openBrowser() {
   }
 }
 
-async function findLoginPage(context) {
-  for (const page of context.pages()) {
-    if (/accounts\.feishu\.cn|passport\.feishu\.cn|login/i.test(page.url())) return page
-    const loginPrompt = page.getByText(/扫码授权|请使用飞书移动端扫描二维码|登录飞书账号/).first()
-    if (await loginPrompt.isVisible().catch(() => false)) return page
+function isFeishuAuthorizationUrl(value) {
+  try {
+    const url = new URL(value)
+    return url.hostname === 'accounts.feishu.cn'
+      || url.hostname === 'passport.feishu.cn'
+      || (url.hostname === 'www.doubao.com' && url.pathname.startsWith('/auth/callback'))
+  } catch {
+    return false
   }
-  return null
+}
+
+async function isAuthorizationPage(page) {
+  if (page.isClosed()) return false
+  if (isFeishuAuthorizationUrl(page.url())) return true
+  const loginPrompt = page.getByText(/扫码授权|请使用飞书移动端扫描二维码|登录飞书账号/).first()
+  return loginPrompt.isVisible().catch(() => false)
+}
+
+async function normalizeAuthorizationPages(context) {
+  const authorizationPages = []
+  for (const page of context.pages()) {
+    if (await isAuthorizationPage(page)) authorizationPages.push(page)
+  }
+  if (authorizationPages.length === 0) return { page: null, duplicatesClosed: 0 }
+
+  // context.pages() 按创建顺序返回，保留最新授权页，关闭旧页，避免每次重试累积二维码标签页。
+  const activePage = authorizationPages.at(-1)
+  const duplicatePages = authorizationPages.slice(0, -1)
+  for (const duplicatePage of duplicatePages) {
+    await duplicatePage.close().catch(() => {})
+  }
+  return { page: activePage, duplicatesClosed: duplicatePages.length }
+}
+
+async function isExpiredAuthorizationPage(page) {
+  const expiredPrompt = page.getByText(/二维码.{0,8}(已过期|已失效)|授权.{0,8}(已过期|已失效)|重新获取二维码|刷新二维码/).first()
+  return expiredPrompt.isVisible().catch(() => false)
+}
+
+async function findAdminPage(context) {
+  const pages = context.pages().filter((candidate) => (
+    candidate.url().includes('admin.doubao.com/ask/doubao/builtin-skill')
+      || candidate.url() === ADMIN_URL
+  ))
+  if (pages.length === 0) return null
+  const activePage = pages.at(-1)
+  for (const duplicatePage of pages.slice(0, -1)) {
+    await duplicatePage.close().catch(() => {})
+  }
+  return activePage
+}
+
+async function hasListFrame(page) {
+  for (const frame of page.frames()) {
+    try {
+      if ((await frame.getByRole('heading', { name: '内置技能配置' }).count()) > 0) return true
+    } catch (error) {
+      if (!(error instanceof Error) || !/Frame was detached|Target page, context or browser has been closed/.test(error.message)) {
+        throw error
+      }
+    }
+  }
+  return false
+}
+
+async function waitForAdminOrAuthorization(context, page, timeoutMs = AUTHORIZATION_WAIT_MS) {
+  const deadline = Date.now() + timeoutMs
+  let duplicatesClosed = 0
+  while (Date.now() < deadline) {
+    const authorization = await normalizeAuthorizationPages(context)
+    duplicatesClosed += authorization.duplicatesClosed
+    if (authorization.page) {
+      return { type: 'authorization', page: authorization.page, duplicatesClosed }
+    }
+    if (!page.isClosed() && await hasListFrame(page)) {
+      return { type: 'ready', page, duplicatesClosed }
+    }
+    await new Promise((resolve) => setTimeout(resolve, 250))
+  }
+
+  const authorization = await normalizeAuthorizationPages(context)
+  if (authorization.page) {
+    return {
+      type: 'authorization',
+      page: authorization.page,
+      duplicatesClosed: duplicatesClosed + authorization.duplicatesClosed,
+    }
+  }
+  throw new Error('豆包企业后台页面结构未就绪')
 }
 
 async function findFrame(page, predicate, timeoutMs = 20_000) {
@@ -193,32 +276,52 @@ try {
     throw new Error('没有待上传的 Agent Skill')
   }
   browserHandle = await openBrowser()
-  const pages = browserHandle.context.pages()
-  let page = pages.find((candidate) => candidate.url().includes('admin.doubao.com/ask/doubao/builtin-skill'))
-  if (!page) {
-    page = await browserHandle.context.newPage()
-    await page.goto(ADMIN_URL, { waitUntil: 'domcontentloaded' })
+  let authorization = await normalizeAuthorizationPages(browserHandle.context)
+
+  // 飞书二维码有平台有效期。过期页关闭后只触发一次新授权，未过期页直接复用，不再打开后台。
+  if (authorization.page && await isExpiredAuthorizationPage(authorization.page)) {
+    await authorization.page.close().catch(() => {})
+    authorization = { page: null, duplicatesClosed: authorization.duplicatesClosed }
   }
-  await page.waitForTimeout(1_500)
-  const loginPage = await findLoginPage(browserHandle.context)
-  if (loginPage) {
-    await loginPage.bringToFront()
+
+  if (authorization.page) {
+    await authorization.page.bringToFront()
     workerResult = {
       success: false,
       requiresUserAction: true,
-      message: '受控浏览器已重新打开，请完成飞书扫码授权后点击“已完成扫码登录”',
+      message: authorization.duplicatesClosed > 0
+        ? `已关闭 ${authorization.duplicatesClosed} 个重复授权页，请在当前唯一飞书授权页扫码后点击“已完成扫码登录”`
+        : '已复用当前飞书授权页，请扫码后点击“已完成扫码登录”',
       uploadedSkillIds: [],
     }
   } else {
-    const counts = await upload(page, payload.skills)
-    const detail = counts.uploadedCount === 0
-      ? `企业列表已存在 ${counts.existingCount} 个 Skill，无需重复上传`
-      : `新上传 ${counts.uploadedCount} 个、已存在 ${counts.existingCount} 个`
-    workerResult = {
-      success: true,
-      requiresUserAction: false,
-      message: `已通过 Playwright 验证 ${payload.skills.length} 个企业 Skill（${detail}）`,
-      uploadedSkillIds: payload.skills.map((skill) => skill.id),
+    let page = await findAdminPage(browserHandle.context)
+    if (!page) {
+      page = await browserHandle.context.newPage()
+      await page.goto(ADMIN_URL, { waitUntil: 'domcontentloaded' })
+    }
+    const state = await waitForAdminOrAuthorization(browserHandle.context, page)
+    if (state.type === 'authorization') {
+      await state.page.bringToFront()
+      workerResult = {
+        success: false,
+        requiresUserAction: true,
+        message: state.duplicatesClosed > 0
+          ? `已关闭 ${state.duplicatesClosed} 个重复授权页，请在当前唯一飞书授权页扫码后点击“已完成扫码登录”`
+          : '飞书授权页已打开，请扫码后点击“已完成扫码登录”',
+        uploadedSkillIds: [],
+      }
+    } else {
+      const counts = await upload(state.page, payload.skills)
+      const detail = counts.uploadedCount === 0
+        ? `企业列表已存在 ${counts.existingCount} 个 Skill，无需重复上传`
+        : `新上传 ${counts.uploadedCount} 个、已存在 ${counts.existingCount} 个`
+      workerResult = {
+        success: true,
+        requiresUserAction: false,
+        message: `已通过 Playwright 验证 ${payload.skills.length} 个企业 Skill（${detail}）`,
+        uploadedSkillIds: payload.skills.map((skill) => skill.id),
+      }
     }
   }
 } catch (error) {
