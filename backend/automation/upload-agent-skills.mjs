@@ -193,14 +193,20 @@ async function getListFrame(page) {
   ) > 0)
 }
 
-async function skillExists(page, skillId) {
+async function skillExists(page, skillId, { reuseCurrentSearch = false } = {}) {
   for (let attempt = 0; attempt < 3; attempt += 1) {
     try {
       const listFrame = await getListFrame(page)
       const search = listFrame.getByPlaceholder('搜索名称')
-      await search.fill(skillId)
-      await search.press('Enter')
-      await page.waitForTimeout(1_000)
+      const currentSearch = reuseCurrentSearch ? await search.inputValue().catch(() => '') : ''
+      if (currentSearch !== skillId) {
+        await search.fill(skillId)
+        await search.press('Enter')
+        await page.waitForTimeout(1_000)
+      } else {
+        // 上传弹窗关闭后筛选词通常仍保留，等待列表刷新即可，无需再次触发相同搜索。
+        await page.waitForTimeout(500)
+      }
       const refreshedListFrame = await getListFrame(page)
       const exactSkill = refreshedListFrame.getByText(skillId, { exact: true }).first()
       try {
@@ -259,8 +265,10 @@ async function upload(page, skills) {
   const missingSkills = skills.filter((skill) => !existingSkillIds.includes(skill.id))
   if (missingSkills.length > 0) await uploadMissing(page, missingSkills)
 
-  for (const skill of skills) {
-    if (!(await skillExists(page, skill.id))) {
+  // 上传操作不会删除预先确认存在的 Skill，只校验本次新上传项即可避免重复搜索。
+  for (let index = 0; index < missingSkills.length; index += 1) {
+    const skill = missingSkills[index]
+    if (!(await skillExists(page, skill.id, { reuseCurrentSearch: index === missingSkills.length - 1 }))) {
       throw new Error(`上传结束后未在企业技能列表中找到 ${skill.id}`)
     }
   }
