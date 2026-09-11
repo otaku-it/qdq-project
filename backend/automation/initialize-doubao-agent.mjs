@@ -137,6 +137,12 @@ function isDoubaoTaskUrl(value) {
   }
 }
 
+function isPersistedDoubaoTaskUrl(value) {
+  if (!isDoubaoTaskUrl(value)) return false
+  const taskId = new URL(value).pathname.split('/').filter(Boolean).at(-1)
+  return Boolean(taskId && !taskId.startsWith('local_'))
+}
+
 function escapeRegex(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
@@ -150,6 +156,80 @@ async function findExistingTask(context, marker) {
       await page.bringToFront()
       return { page, duplicatesClosed: normalized.duplicatesClosed }
     }
+  }
+  return null
+}
+
+function skillMarkerPattern(idempotencyKey, skillId) {
+  // 豆包会将 Skill 标签与正文拆为相邻节点，并可能吞掉斜杠前的空格，不能依赖完整字符串匹配。
+  return new RegExp(
+    `智灵启动器任务\\s*${escapeRegex(idempotencyKey)}\\s*\\/\\s*${escapeRegex(skillId)}`,
+  )
+}
+
+function initializationStorageKey(idempotencyKey) {
+  return `zhiling-launcher:initialization:${idempotencyKey}`
+}
+
+async function readRecordedTasks(page, idempotencyKey) {
+  const stored = await page.evaluate((key) => {
+    try {
+      return JSON.parse(window.localStorage.getItem(key) ?? '{}')
+    } catch {
+      return {}
+    }
+  }, initializationStorageKey(idempotencyKey)).catch(() => ({}))
+
+  return new Map(Object.entries(stored).filter(([skillId, taskUrl]) => (
+    typeof skillId === 'string' && typeof taskUrl === 'string' && isPersistedDoubaoTaskUrl(taskUrl)
+  )))
+}
+
+async function recordTask(page, idempotencyKey, skillId, taskUrl) {
+  await page.evaluate(({ key, skillId: id, url }) => {
+    let recorded = {}
+    try {
+      recorded = JSON.parse(window.localStorage.getItem(key) ?? '{}')
+    } catch {
+      // 记录仅用于失败恢复，损坏的数据不会影响实际初始化。
+    }
+    window.localStorage.setItem(key, JSON.stringify({ ...recorded, [id]: url }))
+  }, { key: initializationStorageKey(idempotencyKey), skillId, url: taskUrl })
+}
+
+async function findExistingTaskInSidebar(page, marker, skillId) {
+  const originalUrl = page.url()
+  const expectedTitle = `初始化${skillId}能力`
+  const candidateUrls = await page.locator('a[href^="/chat/"]').evaluateAll((links, title) => {
+    const candidates = new Map()
+    for (const link of links) {
+      const href = link.getAttribute('href')
+      if (!href || candidates.has(href)) continue
+      candidates.set(href, link.textContent?.includes(title) ? 0 : 1)
+    }
+    return [...candidates.entries()]
+      .sort(([, leftPriority], [, rightPriority]) => leftPriority - rightPriority)
+      .map(([href]) => href)
+  }, expectedTitle).catch(() => [])
+
+  // 失败后刚创建的任务会位于“最近”列表前部，限制扫描范围避免历史会话拖慢整个启动器。
+  for (const candidateUrl of candidateUrls.slice(0, 10)) {
+    const taskUrl = new URL(candidateUrl, WORK_ORIGIN).toString()
+    if (!isDoubaoTaskUrl(taskUrl)) continue
+    const currentUrl = new URL(page.url())
+    const candidateTaskUrl = new URL(taskUrl)
+    if (currentUrl.origin !== candidateTaskUrl.origin || currentUrl.pathname !== candidateTaskUrl.pathname) {
+      await page.goto(taskUrl, { waitUntil: 'domcontentloaded' })
+    }
+    const markerElement = page.getByText(marker, { exact: false }).last()
+    if (await markerElement.isVisible({ timeout: 3_000 }).catch(() => false)) {
+      await page.bringToFront()
+      return { page, taskUrl: page.url() }
+    }
+  }
+
+  if (page.url() !== originalUrl) {
+    await page.goto(originalUrl, { waitUntil: 'domcontentloaded' }).catch(() => {})
   }
   return null
 }
@@ -204,9 +284,14 @@ async function findComposer(page) {
 }
 
 async function openNewTask(page) {
+  const previousUrl = page.url()
   const newTask = page.getByText('新工作任务', { exact: true }).first()
   await newTask.waitFor({ state: 'visible', timeout: 20_000 })
   await newTask.click()
+  if (isDoubaoTaskUrl(previousUrl)) {
+    // 豆包会缓存旧会话正文，不能以正文隐藏作为新建任务完成条件；路由离开旧任务才是可靠信号。
+    await page.waitForURL((url) => url.toString() !== previousUrl, { timeout: 20_000 })
+  }
   const moreSkills = page.getByRole('button', { name: '更多技能', exact: true })
   await moreSkills.waitFor({ state: 'visible', timeout: 20_000 })
   await findComposer(page)
@@ -237,25 +322,67 @@ async function selectEnterpriseSkill(page, skillId) {
     .waitFor({ state: 'visible', timeout: 10_000 })
 }
 
-async function submitTask(page, prompt, marker, skillIds) {
-  for (const skillId of skillIds) await selectEnterpriseSkill(page, skillId)
+async function submitTask(page, prompt, jobId, skillId) {
+  await selectEnterpriseSkill(page, skillId)
 
   const composer = await findComposer(page)
-  for (const skillId of skillIds) {
-    if (!(await composer.getByRole('button', { name: skillId, exact: true }).isVisible().catch(() => false))) {
-      throw new Error(`发送前未检测到已挂载的企业 Skill：${skillId}`)
-    }
+  if (!(await composer.getByRole('button', { name: skillId, exact: true }).isVisible().catch(() => false))) {
+    throw new Error(`发送前未检测到已挂载的企业 Skill：${skillId}`)
   }
 
   // 使用键盘插入文本以保留 contenteditable 中已经挂载的 Skill 标签。
   await composer.click()
   await composer.press('End')
   await page.keyboard.insertText(prompt)
+  const previousUrl = page.url()
   await composer.press('Enter')
 
-  await page.waitForURL((url) => isDoubaoTaskUrl(url.toString()), { timeout: 30_000 })
-  await page.getByText(marker, { exact: false }).last()
+  // 若页面仍停在上一个 /chat/{id}，isDoubaoTaskUrl 会立即成立，必须同时确认路由已切换。
+  await page.waitForURL(
+    (url) => isDoubaoTaskUrl(url.toString()) && url.toString() !== previousUrl,
+    { timeout: 30_000 },
+  )
+  await page.getByText(jobId, { exact: false }).last()
     .waitFor({ state: 'visible', timeout: 20_000 })
+  // 豆包先路由到 /chat/local_*，随后才落盘为可出现在左侧列表中的真实会话 ID。
+  // 只有真实 ID 可用于置顶和扫码后的幂等恢复。
+  if (!isPersistedDoubaoTaskUrl(page.url())) {
+    await page.waitForURL((url) => isPersistedDoubaoTaskUrl(url.toString()), { timeout: 30_000 })
+  }
+  return page.url()
+}
+
+async function pinTask(page, taskUrl) {
+  const url = new URL(taskUrl)
+  const taskId = url.pathname.split('/').filter(Boolean).at(-1)
+  if (!taskId || taskId.startsWith('local_') || !/^[a-zA-Z0-9_-]+$/.test(taskId)) {
+    throw new Error(`无法从豆包任务地址识别会话 ID：${taskUrl}`)
+  }
+
+  const conversation = page.locator(`a[href^="/chat/${taskId}"]`).first()
+  await conversation.waitFor({ state: 'visible', timeout: 20_000 })
+  await conversation.hover()
+
+  const menuTrigger = conversation.locator('button[aria-haspopup="menu"]').first()
+  await menuTrigger.waitFor({ state: 'visible', timeout: 10_000 })
+  await menuTrigger.click()
+
+  const menu = page.locator('[role="menu"]:visible').last()
+  await menu.waitFor({ state: 'visible', timeout: 10_000 })
+  const pinItem = menu.getByRole('menuitem', { name: /^置顶(?:\s|$)/ }).first()
+  if (await pinItem.isVisible().catch(() => false)) {
+    await pinItem.click()
+    await menu.waitFor({ state: 'hidden', timeout: 10_000 })
+    return
+  }
+
+  const unpinItem = menu.getByRole('menuitem', { name: /^取消置顶(?:\s|$)/ }).first()
+  if (await unpinItem.isVisible().catch(() => false)) {
+    await page.keyboard.press('Escape')
+    return
+  }
+  await page.keyboard.press('Escape')
+  throw new Error(`豆包会话 ${taskId} 的操作菜单中未找到“置顶”`)
 }
 
 let browserHandle
@@ -272,18 +399,26 @@ try {
     throw new Error('缺少初始化任务幂等键')
   }
 
-  const marker = `[智灵启动器任务 ${payload.idempotencyKey}]`
-  const prompt = `${marker}\n请使用本任务已挂载的企业 Skills 完成初始化，并确认能力已就绪。已选择技能：${skills.join('、')}。`
+  const legacyMarker = `[智灵启动器任务 ${payload.idempotencyKey}]`
+  const skillMarker = (skillId) => `[智灵启动器任务 ${payload.idempotencyKey} / ${skillId}]`
   browserHandle = await openBrowser()
 
-  const existingTask = await findExistingTask(browserHandle.context, marker)
-  if (existingTask) {
+  // 最后一个 Skill 的任务存在，说明前面的任务已按顺序发送完成；同时兼容旧版合并任务的幂等标记。
+  const existingTask = await findExistingTask(
+    browserHandle.context,
+    skillMarkerPattern(payload.idempotencyKey, skills.at(-1)),
+  )
+  const legacyTask = existingTask
+    ? null
+    : await findExistingTask(browserHandle.context, legacyMarker)
+  if (legacyTask) {
+    await pinTask(legacyTask.page, legacyTask.page.url())
     workerResult = {
       success: true,
       requiresUserAction: false,
       message: `已复用本次启动器创建的豆包工作任务，并验证 ${skills.length} 个企业 Skill`,
       initializedSkillIds: skills,
-      taskUrl: existingTask.page.url(),
+      taskUrl: legacyTask.page.url(),
     }
   } else {
     const existingAuthorization = await findAuthorizationPage(browserHandle.context)
@@ -295,8 +430,11 @@ try {
       await existingAuthorization.bringToFront()
       workerResult = waitingForLogin(normalized.duplicatesClosed)
     } else {
-      const workPage = await openWorkPage(browserHandle.context)
-      const page = workPage.page
+      const workPage = existingTask
+        ? { page: existingTask.page, duplicatesClosed: existingTask.duplicatesClosed }
+        : await openWorkPage(browserHandle.context)
+      let page = workPage.page
+      const recordedTasks = await readRecordedTasks(page, payload.idempotencyKey)
       const loginPage = await openLoginIfRequired(browserHandle.context, page)
       if (loginPage) {
         const normalized = await closeDuplicateWorkPages(
@@ -307,14 +445,41 @@ try {
         workerResult = waitingForLogin(workPage.duplicatesClosed + normalized.duplicatesClosed)
       } else {
         try {
-          await openNewTask(page)
-          await submitTask(page, prompt, marker, skills)
+          const taskUrls = []
+          for (const skillId of skills) {
+            const markerPattern = skillMarkerPattern(payload.idempotencyKey, skillId)
+            const recordedTaskUrl = recordedTasks.get(skillId)
+            if (recordedTaskUrl) {
+              taskUrls.push(recordedTaskUrl)
+              continue
+            }
+            const existingSkillTask = await findExistingTask(browserHandle.context, markerPattern)
+              ?? await findExistingTaskInSidebar(page, markerPattern, skillId)
+            if (existingSkillTask) {
+              page = existingSkillTask.page
+              taskUrls.push(page.url())
+              recordedTasks.set(skillId, page.url())
+              await recordTask(page, payload.idempotencyKey, skillId, page.url())
+              continue
+            }
+            const marker = skillMarker(skillId)
+            const prompt = `${marker}\n请使用本任务已挂载的企业 Skill「${skillId}」完成初始化，并确认该能力已就绪。`
+            await openNewTask(page)
+            const taskUrl = await submitTask(page, prompt, payload.idempotencyKey, skillId)
+            taskUrls.push(taskUrl)
+            recordedTasks.set(skillId, taskUrl)
+            await recordTask(page, payload.idempotencyKey, skillId, taskUrl)
+          }
+          for (const taskUrl of [...new Set(taskUrls)]) {
+            await pinTask(page, taskUrl)
+          }
+          const finalTaskUrl = page.url()
           workerResult = {
             success: true,
             requiresUserAction: false,
-            message: `已创建豆包工作任务并挂载 ${skills.length} 个企业 Skill：${page.url()}`,
+            message: `已创建并置顶 ${taskUrls.length} 个豆包工作任务，每个任务分别初始化 1 个企业 Skill：${skills.join('、')}`,
             initializedSkillIds: skills,
-            taskUrl: page.url(),
+            taskUrl: finalTaskUrl,
           }
         } catch (error) {
           // 登录入口可能在页面异步渲染后才出现。超时前再次检查，未登录应暂停而不是失败。

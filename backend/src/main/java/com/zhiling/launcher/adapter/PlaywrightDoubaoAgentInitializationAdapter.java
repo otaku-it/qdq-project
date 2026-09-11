@@ -14,7 +14,10 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 /**
  * 调用独立 Node Playwright Worker，在普通用户的豆包工作台中创建初始化任务。
@@ -31,6 +34,7 @@ public class PlaywrightDoubaoAgentInitializationAdapter implements DoubaoAgentIn
     private final Path workerScript;
     private final Duration timeout;
     private final Map<String, InitializationResult> completedResults = new ConcurrentHashMap<>();
+    private final Map<String, CompletableFuture<InitializationResult>> inFlightResults = new ConcurrentHashMap<>();
 
     public PlaywrightDoubaoAgentInitializationAdapter(
             ObjectMapper objectMapper,
@@ -50,6 +54,42 @@ public class PlaywrightDoubaoAgentInitializationAdapter implements DoubaoAgentIn
         if (completed != null) {
             return completed;
         }
+
+        CompletableFuture<InitializationResult> ownExecution = new CompletableFuture<>();
+        CompletableFuture<InitializationResult> runningExecution = inFlightResults.putIfAbsent(
+                request.idempotencyKey(), ownExecution
+        );
+        if (runningExecution != null) {
+            return awaitRunningExecution(runningExecution);
+        }
+
+        try {
+            InitializationResult result = executeWorker(request);
+            ownExecution.complete(result);
+            return result;
+        } catch (RuntimeException exception) {
+            ownExecution.completeExceptionally(exception);
+            return InitializationResult.failed("PLAYWRIGHT", safeMessage(exception.getMessage()));
+        } finally {
+            inFlightResults.remove(request.idempotencyKey(), ownExecution);
+        }
+    }
+
+    /** 同一个启动器任务只允许一个 Worker 操作浏览器，防止扫码完成请求重入导致重复发送。 */
+    private InitializationResult awaitRunningExecution(CompletableFuture<InitializationResult> runningExecution) {
+        try {
+            return runningExecution.get(timeout.toSeconds(), TimeUnit.SECONDS);
+        } catch (InterruptedException exception) {
+            Thread.currentThread().interrupt();
+            return InitializationResult.failed("PLAYWRIGHT", "豆包初始化等待被中断");
+        } catch (TimeoutException exception) {
+            return InitializationResult.failed("PLAYWRIGHT", "同一启动器任务正在初始化，请勿重复提交");
+        } catch (ExecutionException exception) {
+            return InitializationResult.failed("PLAYWRIGHT", safeMessage(exception.getCause().getMessage()));
+        }
+    }
+
+    private InitializationResult executeWorker(InitializationRequest request) {
         if (!Files.isRegularFile(workerScript)) {
             return InitializationResult.failed("PLAYWRIGHT", "豆包初始化 Worker 不存在：" + workerScript);
         }
