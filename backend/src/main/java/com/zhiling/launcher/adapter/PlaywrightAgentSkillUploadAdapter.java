@@ -9,13 +9,17 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import java.util.zip.ZipEntry;
+import java.util.zip.ZipFile;
 import java.util.zip.ZipOutputStream;
 
 /**
@@ -103,25 +107,134 @@ public class PlaywrightAgentSkillUploadAdapter implements AgentSkillUploadAdapte
         }
     }
 
-    private Map<String, String> packageSkills(List<String> skillIds, Path targetDirectory) throws IOException {
+    Map<String, String> packageSkills(List<String> skillIds, Path targetDirectory) throws IOException {
         Map<String, String> packages = new LinkedHashMap<>();
         for (String skillId : skillIds) {
             if (!skillId.matches("[a-z0-9-]+")) {
                 throw new IOException("非法 Skill ID：" + skillId);
             }
-            Path source = skillDirectory.resolve(skillId).resolve("SKILL.md").normalize();
-            if (!source.startsWith(skillDirectory.normalize()) || !Files.isRegularFile(source)) {
-                throw new IOException("缺少 Skill 源文件：" + source);
-            }
-            Path archive = targetDirectory.resolve(skillId + ".skill");
-            try (ZipOutputStream zip = new ZipOutputStream(Files.newOutputStream(archive))) {
-                zip.putNextEntry(new ZipEntry("SKILL.md"));
-                Files.copy(source, zip);
-                zip.closeEntry();
-            }
+            Path archive = prepareSkillPackage(skillId, targetDirectory);
             packages.put(skillId, archive.toAbsolutePath().toString());
         }
         return packages;
+    }
+
+    private Path prepareSkillPackage(String skillId, Path targetDirectory) throws IOException {
+        Path baseDirectory = skillDirectory.toAbsolutePath().normalize();
+        Path zipSource = baseDirectory.resolve(skillId + ".zip").normalize();
+        if (Files.isRegularFile(zipSource)) {
+            return copyValidatedArchive(zipSource, targetDirectory.resolve(skillId + ".zip"));
+        }
+
+        Path skillSource = baseDirectory.resolve(skillId + ".skill").normalize();
+        if (Files.isRegularFile(skillSource)) {
+            return copyValidatedArchive(skillSource, targetDirectory.resolve(skillId + ".skill"));
+        }
+
+        // 保留原有目录模式：只有 SKILL.md 时继续生成豆包支持的 .skill 压缩包。
+        Path markdownSource = baseDirectory.resolve(skillId).resolve("SKILL.md").normalize();
+        if (!markdownSource.startsWith(baseDirectory) || !Files.isRegularFile(markdownSource)) {
+            throw new IOException("缺少 Skill 源文件，支持：" + skillId + ".zip、"
+                    + skillId + ".skill 或 " + skillId + "/SKILL.md");
+        }
+        Path archive = targetDirectory.resolve(skillId + ".skill");
+        try (ZipOutputStream zip = new ZipOutputStream(Files.newOutputStream(archive))) {
+            zip.putNextEntry(new ZipEntry("SKILL.md"));
+            Files.copy(markdownSource, zip);
+            zip.closeEntry();
+        }
+        return archive;
+    }
+
+    private Path copyValidatedArchive(Path source, Path target) throws IOException {
+        try (ZipFile zip = new ZipFile(source.toFile())) {
+            ZipEntry skillMarkdown = zip.getEntry("SKILL.md");
+            if (skillMarkdown != null && !skillMarkdown.isDirectory()) {
+                Files.copy(source, target, StandardCopyOption.REPLACE_EXISTING);
+                return target;
+            }
+
+            String wrapperDirectory = findSingleSkillWrapper(zip);
+            if (wrapperDirectory == null) {
+                throw new IOException("Skill 压缩包根目录缺少 SKILL.md：" + source);
+            }
+            normalizeWrappedArchive(zip, wrapperDirectory, target);
+            return target;
+        } catch (IOException exception) {
+            if (exception.getMessage() != null && exception.getMessage().startsWith("Skill 压缩包")) {
+                throw exception;
+            }
+            throw new IOException("无法读取 Skill 压缩包：" + source, exception);
+        }
+    }
+
+    /**
+     * 兼容 macOS Finder 常见的“压缩整个目录”格式：忽略 __MACOSX 后仅存在一个顶层目录，
+     * 且该目录内直接包含 SKILL.md。豆包要求 SKILL.md 位于上传包根目录，因此生成临时规范包。
+     */
+    private static String findSingleSkillWrapper(ZipFile zip) {
+        Set<String> topLevelNames = new LinkedHashSet<>();
+        zip.stream()
+                .map(ZipEntry::getName)
+                .filter(name -> !isMacMetadata(name))
+                .forEach(name -> {
+                    int separator = name.indexOf('/');
+                    if (separator > 0) {
+                        topLevelNames.add(name.substring(0, separator));
+                    } else if (!name.isBlank()) {
+                        topLevelNames.add(name);
+                    }
+                });
+        if (topLevelNames.size() != 1) {
+            return null;
+        }
+        String wrapper = topLevelNames.iterator().next();
+        ZipEntry skillMarkdown = zip.getEntry(wrapper + "/SKILL.md");
+        return skillMarkdown != null && !skillMarkdown.isDirectory() ? wrapper : null;
+    }
+
+    private static void normalizeWrappedArchive(ZipFile source, String wrapperDirectory, Path target) throws IOException {
+        String prefix = wrapperDirectory + "/";
+        try (ZipOutputStream normalized = new ZipOutputStream(Files.newOutputStream(target))) {
+            for (ZipEntry entry : source.stream().toList()) {
+                String sourceName = entry.getName();
+                if (!sourceName.startsWith(prefix) || isMacMetadata(sourceName)) {
+                    continue;
+                }
+                String normalizedName = sourceName.substring(prefix.length());
+                if (normalizedName.isEmpty()) {
+                    continue;
+                }
+                if (!isSafeArchiveEntry(normalizedName)) {
+                    throw new IOException("Skill 压缩包包含非法路径：" + sourceName);
+                }
+                normalized.putNextEntry(new ZipEntry(normalizedName));
+                if (!entry.isDirectory()) {
+                    try (var input = source.getInputStream(entry)) {
+                        input.transferTo(normalized);
+                    }
+                }
+                normalized.closeEntry();
+            }
+        }
+    }
+
+    private static boolean isMacMetadata(String entryName) {
+        return entryName.startsWith("__MACOSX/")
+                || entryName.equals("__MACOSX")
+                || entryName.substring(entryName.lastIndexOf('/') + 1).startsWith("._");
+    }
+
+    private static boolean isSafeArchiveEntry(String entryName) {
+        if (entryName.startsWith("/") || entryName.contains("\\")) {
+            return false;
+        }
+        for (String segment : entryName.split("/")) {
+            if (segment.isBlank() || segment.equals(".") || segment.equals("..")) {
+                return false;
+            }
+        }
+        return true;
     }
 
     private static Path resolveProjectPath(String configuredPath) {

@@ -61,7 +61,8 @@ public class LauncherJobService {
             new SkillView("project-plan", "项目计划", "拆分里程碑、排期和负责人", "项目管理"),
             new SkillView("requirement-analysis", "需求梳理", "提炼需求、验收标准和待确认项", "项目管理"),
             new SkillView("risk-tracking", "风险跟踪", "识别风险、责任人和缓解动作", "项目管理"),
-            new SkillView("weekly-report", "周报生成", "汇总进展并生成项目周报", "协作效率")
+            new SkillView("weekly-report", "周报生成", "汇总进展并生成项目周报", "协作效率"),
+            new SkillView("scene-analysis-enhanced", "买家秀场景分析", "分析买家实拍场景、风格和核心痛点，生成五 Sheet 分析表", "电商运营")
     );
 
     /** 仅用于 Demo 的任务仓库；单个任务仍由 synchronized(job) 保护。 */

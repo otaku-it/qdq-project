@@ -43,7 +43,7 @@ npm run dev
 
 - 飞书登录：后端生成一次性二维码，并以扫码回调更新任务状态；不要在浏览器或日志中固化会话凭据。
 - 钉钉/飞书知识库同步：记录源文档、目标文档、同步游标、版本冲突和失败重试信息。
-- Skills 上传：Playwright Worker 在受控登录会话中进入豆包企业管理后台“内置技能管理”，上传根目录包含 `SKILL.md` 的 `.skill` 文件，并在列表中按 Skill ID 验证回显。只有真实回显成功后才写入租户级 Skills 目录。
+- Skills 上传：Playwright Worker 在受控登录会话中进入豆包企业管理后台“内置技能管理”，上传根目录包含 `SKILL.md` 的 `.zip` / `.skill` 文件，并在列表中按 Skill ID 验证回显。只有真实回显成功后才写入租户级 Skills 目录。
 - 普通用户初始化：校验 `tenant_id + skill_id + version` 已预置，再由 Playwright 打开“新工作任务”，从“企业”分组挂载选中的 Skills，发送带任务幂等键的初始化消息，并以新任务 URL 和消息回显作为成功依据。
 - 任务运行：将 `LauncherJobService` 的内存状态替换为持久化任务、幂等键、审计日志和可恢复的工作队列。
 
@@ -74,7 +74,13 @@ export DOUBAO_CDP_ENDPOINT=http://127.0.0.1:9222
 ./mvnw spring-boot:run
 ```
 
-可上传 Skill 源文件位于 `backend/skills/<skill-id>/SKILL.md`。Java 适配器在每次任务中生成临时 `.skill` 压缩包，任务结束后清理；Cookie、Token 和二维码凭据不会写入工程或任务日志。
+可上传 Skill 源文件位于 `backend/skills`，按以下优先级匹配所选 Skill ID：
+
+1. `<skill-id>.zip`：根目录必须包含 `SKILL.md`，保留包内全部文件并原样上传。
+2. `<skill-id>.skill`：根目录必须包含 `SKILL.md`，保留包内全部文件并原样上传。
+3. `<skill-id>/SKILL.md`：兼容原有目录模式，由 Java 适配器生成临时 `.skill` 包。
+
+例如页面中的 `project-plan` 对应 `backend/skills/project-plan.zip`。压缩包文件名必须与页面使用的 Skill ID 一致；任务结束后只清理临时副本，工程中的源文件不会删除。Cookie、Token 和二维码凭据不会写入工程或任务日志。
 
 豆包后台入口和 DOM 选择器集中在 `backend/automation/upload-agent-skills.mjs`。如果页面改版，只需调整 Worker，不影响 Spring Boot 编排接口。
 
