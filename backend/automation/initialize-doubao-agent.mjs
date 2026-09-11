@@ -55,13 +55,76 @@ async function openBrowser() {
   }
 }
 
-async function findLoginPage(context) {
+function isDoubaoWorkPage(page) {
+  try {
+    const url = new URL(page.url())
+    return url.origin === WORK_ORIGIN && url.pathname.startsWith('/chat')
+  } catch {
+    return false
+  }
+}
+
+function isAuthorizationOrigin(value) {
+  try {
+    const url = new URL(value)
+    return url.origin === WORK_ORIGIN
+      || url.hostname === 'accounts.feishu.cn'
+      || url.hostname === 'passport.feishu.cn'
+  } catch {
+    return false
+  }
+}
+
+async function closeDuplicateWorkPages(context, preferredPage = null) {
+  const pages = context.pages().filter(isDoubaoWorkPage)
+  const activePage = preferredPage && pages.includes(preferredPage) ? preferredPage : pages.at(-1)
+  if (!activePage) return { page: null, duplicatesClosed: 0 }
+
+  let duplicatesClosed = 0
+  for (const duplicatePage of pages) {
+    if (duplicatePage === activePage) continue
+    try {
+      await duplicatePage.close()
+      duplicatesClosed += 1
+    } catch {
+      // 页面可能恰好被用户关闭，下一次运行时会重新归一化当前会话。
+    }
+  }
+  return { page: activePage, duplicatesClosed }
+}
+
+async function findAuthorizationPage(context) {
   for (const page of context.pages()) {
-    if (/accounts\.feishu\.cn|passport\.feishu\.cn|login/i.test(page.url())) return page
-    const loginPrompt = page.getByText(/扫码授权|扫描二维码|登录飞书账号|登录豆包/).first()
+    if (!isAuthorizationOrigin(page.url())) continue
+    if (/^https?:\/\/(accounts|passport)\.feishu\.cn(?:\/|$)/i.test(page.url())) return page
+    const loginPrompt = page.getByText(/扫码登录|扫码授权|扫描二维码|使用飞书.{0,8}扫码|登录飞书账号|登录豆包/).first()
     if (await loginPrompt.isVisible().catch(() => false)) return page
   }
   return null
+}
+
+async function findLoginTrigger(page) {
+  const candidates = [
+    page.getByRole('button', { name: '登录', exact: true }).first(),
+    page.getByRole('link', { name: '登录', exact: true }).first(),
+    page.getByText('登录', { exact: true }).first(),
+  ]
+  for (const candidate of candidates) {
+    if (await candidate.isVisible().catch(() => false)) return candidate
+  }
+  return null
+}
+
+async function openLoginIfRequired(context, workPage) {
+  const authorizationPage = await findAuthorizationPage(context)
+  if (authorizationPage) return authorizationPage
+
+  const loginTrigger = await findLoginTrigger(workPage)
+  if (!loginTrigger) return null
+
+  await loginTrigger.click()
+  await workPage.waitForTimeout(1_000)
+  return await findAuthorizationPage(context) ?? workPage
 }
 
 function isDoubaoTaskUrl(value) {
@@ -83,22 +146,47 @@ async function findExistingTask(context, marker) {
     if (!isDoubaoTaskUrl(page.url())) continue
     const markerElement = page.getByText(marker, { exact: false }).last()
     if (await markerElement.isVisible().catch(() => false)) {
+      const normalized = await closeDuplicateWorkPages(context, page)
       await page.bringToFront()
-      return page
+      return { page, duplicatesClosed: normalized.duplicatesClosed }
     }
   }
   return null
 }
 
 async function openWorkPage(context) {
-  let page = context.pages().find((candidate) => candidate.url().startsWith(`${WORK_ORIGIN}/chat`))
-  if (!page) page = await context.newPage()
+  const existing = await closeDuplicateWorkPages(context)
+  let page = existing.page
+  if (!page) {
+    // launchPersistentContext 通常会自带一个 about:blank 页面，优先复用它，避免再创建第二个工作台标签。
+    page = context.pages().find((candidate) => {
+      const url = candidate.url()
+      return url === 'about:blank' || url === ''
+    }) ?? await context.newPage()
+  }
   if (!page.url().startsWith(`${WORK_ORIGIN}/chat`)) {
     await page.goto(WORK_URL, { waitUntil: 'domcontentloaded' })
   }
   await page.bringToFront()
   await page.waitForTimeout(1_000)
-  return page
+  const normalized = await closeDuplicateWorkPages(context, page)
+  return {
+    page,
+    duplicatesClosed: existing.duplicatesClosed + normalized.duplicatesClosed,
+  }
+}
+
+function waitingForLogin(duplicatesClosed = 0) {
+  const cleanupMessage = duplicatesClosed > 0
+    ? `已关闭 ${duplicatesClosed} 个重复豆包工作台页面；`
+    : ''
+  return {
+    success: false,
+    requiresUserAction: true,
+    message: `${cleanupMessage}豆包登录窗口已打开，请使用飞书扫码登录后点击“已完成扫码登录”`,
+    initializedSkillIds: [],
+    taskUrl: null,
+  }
 }
 
 async function findComposer(page) {
@@ -195,29 +283,50 @@ try {
       requiresUserAction: false,
       message: `已复用本次启动器创建的豆包工作任务，并验证 ${skills.length} 个企业 Skill`,
       initializedSkillIds: skills,
-      taskUrl: existingTask.url(),
+      taskUrl: existingTask.page.url(),
     }
   } else {
-    const page = await openWorkPage(browserHandle.context)
-    const loginPage = await findLoginPage(browserHandle.context)
-    if (loginPage) {
-      await loginPage.bringToFront()
-      workerResult = {
-        success: false,
-        requiresUserAction: true,
-        message: '受控浏览器已打开，请完成飞书或豆包扫码登录后点击“已完成扫码登录”',
-        initializedSkillIds: [],
-        taskUrl: null,
-      }
+    const existingAuthorization = await findAuthorizationPage(browserHandle.context)
+    if (existingAuthorization) {
+      const normalized = await closeDuplicateWorkPages(
+        browserHandle.context,
+        isDoubaoWorkPage(existingAuthorization) ? existingAuthorization : null,
+      )
+      await existingAuthorization.bringToFront()
+      workerResult = waitingForLogin(normalized.duplicatesClosed)
     } else {
-      await openNewTask(page)
-      await submitTask(page, prompt, marker, skills)
-      workerResult = {
-        success: true,
-        requiresUserAction: false,
-        message: `已创建豆包工作任务并挂载 ${skills.length} 个企业 Skill：${page.url()}`,
-        initializedSkillIds: skills,
-        taskUrl: page.url(),
+      const workPage = await openWorkPage(browserHandle.context)
+      const page = workPage.page
+      const loginPage = await openLoginIfRequired(browserHandle.context, page)
+      if (loginPage) {
+        const normalized = await closeDuplicateWorkPages(
+          browserHandle.context,
+          isDoubaoWorkPage(loginPage) ? loginPage : page,
+        )
+        await loginPage.bringToFront()
+        workerResult = waitingForLogin(workPage.duplicatesClosed + normalized.duplicatesClosed)
+      } else {
+        try {
+          await openNewTask(page)
+          await submitTask(page, prompt, marker, skills)
+          workerResult = {
+            success: true,
+            requiresUserAction: false,
+            message: `已创建豆包工作任务并挂载 ${skills.length} 个企业 Skill：${page.url()}`,
+            initializedSkillIds: skills,
+            taskUrl: page.url(),
+          }
+        } catch (error) {
+          // 登录入口可能在页面异步渲染后才出现。超时前再次检查，未登录应暂停而不是失败。
+          const delayedLoginPage = await openLoginIfRequired(browserHandle.context, page)
+          if (!delayedLoginPage) throw error
+          const normalized = await closeDuplicateWorkPages(
+            browserHandle.context,
+            isDoubaoWorkPage(delayedLoginPage) ? delayedLoginPage : page,
+          )
+          await delayedLoginPage.bringToFront()
+          workerResult = waitingForLogin(workPage.duplicatesClosed + normalized.duplicatesClosed)
+        }
       }
     }
   }
