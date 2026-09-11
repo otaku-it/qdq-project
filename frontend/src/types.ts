@@ -1,5 +1,12 @@
 export type UserRole = 'ADMIN' | 'USER'
 
+export interface LoginSession {
+  tenantName: string
+  operatorName: string
+  role: UserRole
+  larkUser: string
+}
+
 export interface LauncherTask {
   id: string
   name: string

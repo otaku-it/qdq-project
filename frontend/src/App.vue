@@ -1,13 +1,15 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
-import { Activity, Blocks, Bot, Boxes, CircleHelp, CloudCog, FileStack, LayoutDashboard, Settings2 } from '@lucide/vue'
+import { Activity, Blocks, Bot, Boxes, CircleHelp, CloudCog, FileStack, LayoutDashboard, LogOut, Settings2, UserRound } from '@lucide/vue'
 import { launcherApi } from './api'
+import LoginPage from './components/LoginPage.vue'
 import SetupForm from './components/SetupForm.vue'
 import JobWorkspace from './components/JobWorkspace.vue'
-import type { Blueprint, LauncherJob } from './types'
+import type { Blueprint, LauncherJob, LoginSession } from './types'
 
 const blueprint = ref<Blueprint | null>(null)
 const job = ref<LauncherJob | null>(null)
+const session = ref<LoginSession | null>(readSession())
 const loading = ref(true)
 const busy = ref(false)
 const error = ref('')
@@ -39,6 +41,20 @@ async function createJob(payload: { tenantName: string; operatorName: string; ro
   } finally {
     busy.value = false
   }
+}
+
+function login(nextSession: LoginSession) {
+  session.value = nextSession
+  sessionStorage.setItem('zhiling-launcher-session', JSON.stringify(nextSession))
+  error.value = ''
+}
+
+function logout() {
+  stopPolling()
+  job.value = null
+  session.value = null
+  error.value = ''
+  sessionStorage.removeItem('zhiling-launcher-session')
 }
 
 async function continueJob() {
@@ -104,10 +120,23 @@ function stopPolling() {
 function messageFrom(cause: unknown) {
   return cause instanceof Error ? cause.message : '发生未知错误'
 }
+
+function readSession(): LoginSession | null {
+  try {
+    const value = sessionStorage.getItem('zhiling-launcher-session')
+    if (!value) return null
+    const parsed = JSON.parse(value) as LoginSession
+    if (!parsed.tenantName || !parsed.operatorName || !parsed.larkUser || !['ADMIN', 'USER'].includes(parsed.role)) return null
+    return parsed
+  } catch {
+    return null
+  }
+}
 </script>
 
 <template>
-  <div class="app-shell">
+  <LoginPage v-if="!session" @login="login" />
+  <div v-else class="app-shell">
     <aside class="sidebar">
       <div class="brand"><span class="brand-mark">Z</span><span><strong>智灵领航</strong><small>FEISHU LAUNCHER</small></span></div>
       <nav class="primary-nav" aria-label="主导航">
@@ -123,11 +152,11 @@ function messageFrom(cause: unknown) {
       </nav>
     </aside>
     <main class="main-area">
-      <header class="topbar"><div class="breadcrumb"><span>智灵中台</span><span>/</span><strong>启动器</strong></div><div class="environment-state"><span class="live-dot"></span>Demo 环境<span class="divider"></span><CloudCog :size="17" />API 已连接</div></header>
+      <header class="topbar"><div class="breadcrumb"><span>智灵中台</span><span>/</span><strong>启动器</strong></div><div class="topbar-actions"><div class="environment-state"><span class="live-dot"></span>Demo 环境<span class="divider"></span><CloudCog :size="17" />API 已连接</div><span class="topbar-account"><UserRound :size="15" /><span><strong>{{ session.operatorName }}</strong><small>{{ session.role === 'ADMIN' ? '企业管理员' : '普通用户' }}</small></span></span><button class="topbar-logout" type="button" title="退出登录" aria-label="退出登录" @click="logout"><LogOut :size="17" /></button></div></header>
       <div v-if="error" class="global-error" role="alert"><CircleHelp :size="18" /><span>{{ error }}</span><button type="button" aria-label="关闭" @click="error = ''">×</button></div>
       <div v-if="loading" class="loading-state"><Bot :size="32" /><span>正在加载启动器任务目录</span></div>
       <JobWorkspace v-else-if="job" :job="job" :busy="busy" @continue="continueJob" @retry="retryJob" @reset="reset" />
-      <SetupForm v-else-if="blueprint" :blueprint="blueprint" :submitting="busy" @submit="createJob" />
+      <SetupForm v-else-if="blueprint" :blueprint="blueprint" :session="session" :submitting="busy" @submit="createJob" />
       <footer class="app-footer"><span><FileStack :size="15" /> 钉钉知识库适配器 · 豆包 Skills Playwright Worker</span><span>Vue 3 + Spring Boot</span></footer>
     </main>
   </div>

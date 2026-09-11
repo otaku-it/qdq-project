@@ -1,16 +1,12 @@
 <script setup lang="ts">
 import { computed, reactive, ref } from 'vue'
-import { AlertTriangle, BookOpenCheck, Building2, Check, Play, Sparkles, UserRound, X } from '@lucide/vue'
-import type { Blueprint, UserRole } from '../types'
+import { AlertTriangle, BookOpenCheck, Check, Play, Sparkles, X } from '@lucide/vue'
+import type { Blueprint, LoginSession, UserRole } from '../types'
 
-const props = defineProps<{ blueprint: Blueprint; submitting: boolean }>()
+const props = defineProps<{ blueprint: Blueprint; submitting: boolean; session: LoginSession }>()
 const emit = defineEmits<{ submit: [payload: { tenantName: string; operatorName: string; role: UserRole; larkUser: string; selectedTasks: string[]; selectedSkills: string[]; simulateFailure: boolean }] }>()
 
 const form = reactive({
-  tenantName: '智灵电商演示租户',
-  operatorName: '辛海',
-  role: 'ADMIN' as UserRole,
-  larkUser: '辛海',
   selectedTasks: props.blueprint.tasks.map((task) => task.id),
   selectedSkills: ['project-plan', 'requirement-analysis'],
   simulateFailure: false,
@@ -19,18 +15,9 @@ const skillsModalOpen = ref(false)
 const draftSkills = ref<string[]>([])
 
 const hasSkillsTask = computed(() => form.selectedTasks.includes('agent-skills'))
-const canSubmit = computed(() => form.tenantName.trim().length > 0
-  && form.operatorName.trim().length > 0
-  && form.larkUser.trim().length > 0
-  && form.selectedTasks.length > 0
+const canSubmit = computed(() => form.selectedTasks.length > 0
   && (!hasSkillsTask.value || form.selectedSkills.length > 0)
   && !props.submitting)
-
-function setRole(role: UserRole) {
-  form.role = role
-  form.operatorName = role === 'ADMIN' ? '辛海' : '小王'
-  form.larkUser = role === 'ADMIN' ? '辛海' : '小王'
-}
 
 function toggle(list: string[], id: string) {
   const index = list.indexOf(id)
@@ -62,10 +49,10 @@ function confirmSkills() {
 function submit() {
   if (!canSubmit.value) return
   emit('submit', {
-    tenantName: form.tenantName.trim(),
-    operatorName: form.operatorName.trim(),
-    role: form.role,
-    larkUser: form.larkUser.trim(),
+    tenantName: props.session.tenantName,
+    operatorName: props.session.operatorName,
+    role: props.session.role,
+    larkUser: props.session.larkUser,
     selectedTasks: [...form.selectedTasks],
     selectedSkills: hasSkillsTask.value ? [...form.selectedSkills] : [],
     simulateFailure: form.simulateFailure,
@@ -80,18 +67,6 @@ function submit() {
       <span class="version-tag">方案 {{ blueprint.version }}</span>
     </div>
     <form class="setup-form" @submit.prevent="submit">
-      <div class="form-section">
-        <div class="form-section-title"><h2>当前登录身份</h2><span>租户与组织架构已由中台完成同步</span></div>
-        <div class="role-switch" role="group" aria-label="当前登录身份">
-          <button type="button" :class="{ active: form.role === 'ADMIN' }" @click="setRole('ADMIN')"><Building2 :size="16" />企业管理员</button>
-          <button type="button" :class="{ active: form.role === 'USER' }" @click="setRole('USER')"><UserRound :size="16" />普通用户</button>
-        </div>
-        <div class="input-grid launcher-input-grid">
-          <label class="field"><span>企业租户</span><span class="input-shell"><Building2 :size="17" /><input v-model="form.tenantName" maxlength="80" autocomplete="organization" /></span></label>
-          <label class="field"><span>中台当前用户</span><span class="input-shell"><UserRound :size="17" /><input v-model="form.operatorName" maxlength="80" autocomplete="name" /></span></label>
-          <label class="field"><span>飞书用户</span><span class="input-shell"><UserRound :size="17" /><input v-model="form.larkUser" maxlength="80" autocomplete="name" /></span></label>
-        </div>
-      </div>
       <div class="form-section">
         <div class="form-section-title"><h2>选择启动任务</h2><span>{{ form.selectedTasks.length }}/{{ blueprint.tasks.length }} 已选择</span></div>
         <div class="task-grid">
