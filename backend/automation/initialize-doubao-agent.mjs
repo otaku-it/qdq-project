@@ -198,7 +198,6 @@ async function recordTask(page, idempotencyKey, skillId, taskUrl) {
 }
 
 async function findExistingTaskInSidebar(page, marker, skillId) {
-  const originalUrl = page.url()
   const expectedTitle = `初始化${skillId}能力`
   const candidateUrls = await page.locator('a[href^="/chat/"]').evaluateAll((links, title) => {
     const candidates = new Map()
@@ -216,20 +215,24 @@ async function findExistingTaskInSidebar(page, marker, skillId) {
   for (const candidateUrl of candidateUrls.slice(0, 10)) {
     const taskUrl = new URL(candidateUrl, WORK_ORIGIN).toString()
     if (!isDoubaoTaskUrl(taskUrl)) continue
-    const currentUrl = new URL(page.url())
-    const candidateTaskUrl = new URL(taskUrl)
-    if (currentUrl.origin !== candidateTaskUrl.origin || currentUrl.pathname !== candidateTaskUrl.pathname) {
-      await page.goto(taskUrl, { waitUntil: 'domcontentloaded' })
+    // 不要在主工作页上跳转历史会话：豆包的 SPA 会重置当前任务草稿和已发送记录，
+    // 从而导致后续第二个 Skill 看似执行成功但最终只保留一个发送窗口。
+    const candidatePage = await page.context().newPage()
+    await candidatePage.goto(taskUrl, { waitUntil: 'domcontentloaded' }).catch(() => {})
+    const markerElement = marker
+      ? candidatePage.getByText(marker, { exact: false }).last()
+      : null
+    const markerVisible = markerElement
+      ? await markerElement.isVisible({ timeout: 3_000 }).catch(() => false)
+      : false
+    // 新版初始化消息正文为空，不能仅凭“初始化{skill}能力”标题恢复任务，否则历史
+    // 同名会话会被误认为本次任务已完成，导致选择两个 Skill 时只新建一个窗口。
+    // 无正文任务通过 localStorage 幂等记录恢复；旧版任务继续通过 marker 兼容恢复。
+    if (markerVisible) {
+      await candidatePage.bringToFront()
+      return { page: candidatePage, taskUrl: candidatePage.url() }
     }
-    const markerElement = page.getByText(marker, { exact: false }).last()
-    if (await markerElement.isVisible({ timeout: 3_000 }).catch(() => false)) {
-      await page.bringToFront()
-      return { page, taskUrl: page.url() }
-    }
-  }
-
-  if (page.url() !== originalUrl) {
-    await page.goto(originalUrl, { waitUntil: 'domcontentloaded' }).catch(() => {})
+    await candidatePage.close().catch(() => {})
   }
   return null
 }
@@ -322,7 +325,22 @@ async function selectEnterpriseSkill(page, skillId) {
     .waitFor({ state: 'visible', timeout: 10_000 })
 }
 
-async function submitTask(page, prompt, jobId, skillId) {
+async function clearComposerBody(composer) {
+  // 切换会话时豆包可能暂时复用旧会话的正文节点；递归删除所有不属于 Skill
+  // 标签按钮的文本，确保发送内容严格只有 Skill。
+  await composer.evaluate((element) => {
+    const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT)
+    const textNodes = []
+    while (walker.nextNode()) textNodes.push(walker.currentNode)
+    for (const node of textNodes) {
+      const skillButton = node.parentElement?.closest('button')
+      if (!skillButton || !element.contains(skillButton)) node.remove()
+    }
+    element.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'deleteContentBackward' }))
+  })
+}
+
+async function submitTask(page, skillId) {
   await selectEnterpriseSkill(page, skillId)
 
   const composer = await findComposer(page)
@@ -332,8 +350,8 @@ async function submitTask(page, prompt, jobId, skillId) {
 
   // 使用键盘插入文本以保留 contenteditable 中已经挂载的 Skill 标签。
   await composer.click()
+  await clearComposerBody(composer)
   await composer.press('End')
-  await page.keyboard.insertText(prompt)
   const previousUrl = page.url()
   await composer.press('Enter')
 
@@ -342,8 +360,6 @@ async function submitTask(page, prompt, jobId, skillId) {
     (url) => isDoubaoTaskUrl(url.toString()) && url.toString() !== previousUrl,
     { timeout: 30_000 },
   )
-  await page.getByText(jobId, { exact: false }).last()
-    .waitFor({ state: 'visible', timeout: 20_000 })
   // 豆包先路由到 /chat/local_*，随后才落盘为可出现在左侧列表中的真实会话 ID。
   // 只有真实 ID 可用于置顶和扫码后的幂等恢复。
   if (!isPersistedDoubaoTaskUrl(page.url())) {
@@ -462,10 +478,10 @@ try {
               await recordTask(page, payload.idempotencyKey, skillId, page.url())
               continue
             }
-            const marker = skillMarker(skillId)
-            const prompt = `${marker}\n请使用本任务已挂载的企业 Skill「${skillId}」完成初始化，并确认该能力已就绪。`
             await openNewTask(page)
-            const taskUrl = await submitTask(page, prompt, payload.idempotencyKey, skillId)
+            // 每个任务只发送已挂载的企业 Skill，不再向豆包任务正文注入额外提示词。
+            // Enter 仍需保留，用于触发豆包创建任务会话并生成可持久化的任务 URL。
+            const taskUrl = await submitTask(page, skillId)
             taskUrls.push(taskUrl)
             recordedTasks.set(skillId, taskUrl)
             await recordTask(page, payload.idempotencyKey, skillId, taskUrl)

@@ -49,6 +49,10 @@ function addConversation(taskId, skillId) {
 }
 document.querySelector('#new-task').onclick = () => {
   composer.replaceChildren();
+  // 模拟豆包切换会话时短暂残留上一会话正文，Worker 发送前必须清理它。
+  const stalePrompt = document.createElement('span');
+  stalePrompt.textContent = '残留提示词';
+  composer.append(stalePrompt);
   picker.hidden = true;
   // 豆包切换新任务后仍可能缓存上个会话的文本节点。
   history.pushState({}, '', '/chat?channel=test');
@@ -112,6 +116,10 @@ if (resumeFixture) {
   const keepRoot = new URLSearchParams(location.search).has('root');
   history.replaceState({}, '', (keepRoot ? '/chat' : '/chat/fixture-task-1') + '?records=' + encodeURIComponent(JSON.stringify(records)));
 }
+if (new URLSearchParams(location.search).has('history')) {
+  // 与本次所选 Skill 同名的历史会话不能被当成本次幂等结果复用。
+  addConversation('fixture-history', 'requirement-analysis');
+}
 </script></body></html>`
 
 const unauthenticatedFixture = `<!doctype html><html><body>
@@ -138,7 +146,7 @@ const directory = await mkdtemp(join(tmpdir(), 'zhiling-initialization-test-'))
 const child = spawn(process.execPath, [new URL('./initialize-doubao-agent.mjs', import.meta.url).pathname], {
   env: {
     ...process.env,
-    DOUBAO_WORK_URL: `http://127.0.0.1:${port}/chat/skills`,
+    DOUBAO_WORK_URL: `http://127.0.0.1:${port}/chat/skills?history=1`,
     DOUBAO_USER_DATA_DIR: join(directory, 'profile'),
   },
   stdio: ['pipe', 'pipe', 'pipe'],
@@ -168,10 +176,8 @@ if (taskRecords.length !== 2) throw new Error(stdout)
 if (!taskRecords.every((record) => record.pinned === true)) throw new Error(stdout)
 if (taskRecords[0].attachedSkills.join(',') !== 'project-plan') throw new Error(stdout)
 if (taskRecords[1].attachedSkills.join(',') !== 'requirement-analysis') throw new Error(stdout)
-if (!taskRecords[0].prompt.includes('[智灵启动器任务 fixture-job-1 / project-plan]')) throw new Error(stdout)
-if (taskRecords[0].prompt.includes('requirement-analysis')) throw new Error(stdout)
-if (!taskRecords[1].prompt.includes('[智灵启动器任务 fixture-job-1 / requirement-analysis]')) throw new Error(stdout)
-if (taskRecords[1].prompt.includes('project-plan')) throw new Error(stdout)
+if (taskRecords[0].prompt !== '') throw new Error(stdout)
+if (taskRecords[1].prompt !== '') throw new Error(stdout)
 if (!output.initializedSkillIds.includes('project-plan')) throw new Error(stdout)
 if (!output.initializedSkillIds.includes('requirement-analysis')) throw new Error(stdout)
 if (!/已创建并置顶 2 个豆包工作任务/.test(output.message)) throw new Error(stdout)
