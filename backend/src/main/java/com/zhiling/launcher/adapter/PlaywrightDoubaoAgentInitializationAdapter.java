@@ -102,24 +102,28 @@ public class PlaywrightDoubaoAgentInitializationAdapter implements DoubaoAgentIn
             payload.put("idempotencyKey", request.idempotencyKey());
             payload.put("skills", request.skillIds());
 
-            Process process = new ProcessBuilder(nodeCommand, workerScript.toString())
-                    .redirectErrorStream(false)
-                    .start();
+            Process process = startWorkerProcess();
             try (var input = process.getOutputStream()) {
                 objectMapper.writeValue(input, payload);
             }
 
+            // 在等待 Worker 结束前消费 stdout/stderr，避免 Chrome/Playwright 诊断输出
+            // 写满管道后阻塞 Node 进程，进而让任务树永久停留在“执行中”。
+            CompletableFuture<String> stdoutFuture = readAsync(process.getInputStream());
+            CompletableFuture<String> stderrFuture = readAsync(process.getErrorStream());
+
             boolean exited = process.waitFor(timeout.toSeconds(), TimeUnit.SECONDS);
             if (!exited) {
-                process.destroyForcibly();
+                terminateProcessTree(process);
+                process.waitFor(2, TimeUnit.SECONDS);
                 return InitializationResult.failed(
                         "PLAYWRIGHT",
                         "豆包初始化超过 " + timeout.toSeconds() + " 秒，任务已终止"
                 );
             }
 
-            String stdout = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8).trim();
-            String stderr = new String(process.getErrorStream().readAllBytes(), StandardCharsets.UTF_8).trim();
+            String stdout = awaitOutput(stdoutFuture);
+            String stderr = awaitOutput(stderrFuture);
             if (stdout.isBlank()) {
                 return InitializationResult.failed(
                         "PLAYWRIGHT",
@@ -151,6 +155,42 @@ public class PlaywrightDoubaoAgentInitializationAdapter implements DoubaoAgentIn
         } catch (Exception exception) {
             return InitializationResult.failed("PLAYWRIGHT", safeMessage(exception.getMessage()));
         }
+    }
+
+    private Process startWorkerProcess() throws java.io.IOException {
+        ProcessBuilder builder = new ProcessBuilder(nodeCommand, workerScript.toString())
+                .redirectErrorStream(false);
+        Path workingDirectory = workerScript.getParent();
+        if (workingDirectory != null && Files.isDirectory(workingDirectory)) {
+            builder.directory(workingDirectory.toFile());
+        }
+        return builder.start();
+    }
+
+    private static CompletableFuture<String> readAsync(java.io.InputStream stream) {
+        return CompletableFuture.supplyAsync(() -> {
+            try {
+                return new String(stream.readAllBytes(), StandardCharsets.UTF_8).trim();
+            } catch (java.io.IOException exception) {
+                return "";
+            }
+        });
+    }
+
+    private static String awaitOutput(CompletableFuture<String> output) {
+        try {
+            return output.get(5, TimeUnit.SECONDS);
+        } catch (InterruptedException exception) {
+            Thread.currentThread().interrupt();
+            return "";
+        } catch (ExecutionException | TimeoutException exception) {
+            return "";
+        }
+    }
+
+    private static void terminateProcessTree(Process process) {
+        process.descendants().forEach(child -> child.destroyForcibly());
+        process.destroyForcibly();
     }
 
     private static Path resolveProjectPath(String configuredPath) {

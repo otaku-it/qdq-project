@@ -18,6 +18,9 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeoutException;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
 import java.util.zip.ZipOutputStream;
@@ -70,21 +73,25 @@ public class PlaywrightAgentSkillUploadAdapter implements AgentSkillUploadAdapte
                     .map(entry -> Map.of("id", entry.getKey(), "file", entry.getValue()))
                     .toList());
 
-            Process process = new ProcessBuilder(nodeCommand, workerScript.toString())
-                    .redirectErrorStream(false)
-                    .start();
+            Process process = startWorkerProcess();
             try (var input = process.getOutputStream()) {
                 objectMapper.writeValue(input, payload);
             }
 
+            // 必须在等待进程结束前持续消费两个输出管道。Playwright/Chrome 可能向 stderr
+            // 写入较多诊断信息，若等进程结束后才读取，管道写满会让 Worker 永久阻塞。
+            CompletableFuture<String> stdoutFuture = readAsync(process.getInputStream());
+            CompletableFuture<String> stderrFuture = readAsync(process.getErrorStream());
+
             boolean exited = process.waitFor(timeout.toSeconds(), TimeUnit.SECONDS);
             if (!exited) {
-                process.destroyForcibly();
+                terminateProcessTree(process);
+                process.waitFor(2, TimeUnit.SECONDS);
                 return UploadResult.failed("PLAYWRIGHT", "浏览器上传超过 " + timeout.toSeconds() + " 秒，任务已终止");
             }
 
-            String stdout = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8).trim();
-            String stderr = new String(process.getErrorStream().readAllBytes(), StandardCharsets.UTF_8).trim();
+            String stdout = awaitOutput(stdoutFuture);
+            String stderr = awaitOutput(stderrFuture);
             if (stdout.isBlank()) {
                 return UploadResult.failed("PLAYWRIGHT", stderr.isBlank() ? "Playwright Worker 未返回结果" : safeMessage(stderr));
             }
@@ -105,6 +112,44 @@ public class PlaywrightAgentSkillUploadAdapter implements AgentSkillUploadAdapte
         } finally {
             deleteTemporaryDirectory(temporaryDirectory);
         }
+    }
+
+    private Process startWorkerProcess() throws IOException {
+        ProcessBuilder builder = new ProcessBuilder(nodeCommand, workerScript.toString())
+                .redirectErrorStream(false);
+        // 统一 Worker 的工作目录，避免从 IDE、systemd 或项目根目录启动时 Node 的模块
+        // 搜索路径和相对配置不一致。脚本及技能包仍使用绝对路径，不改变现有部署方式。
+        Path workingDirectory = workerScript.getParent();
+        if (workingDirectory != null && Files.isDirectory(workingDirectory)) {
+            builder.directory(workingDirectory.toFile());
+        }
+        return builder.start();
+    }
+
+    private static CompletableFuture<String> readAsync(java.io.InputStream stream) {
+        return CompletableFuture.supplyAsync(() -> {
+            try {
+                return new String(stream.readAllBytes(), StandardCharsets.UTF_8).trim();
+            } catch (IOException exception) {
+                return "";
+            }
+        });
+    }
+
+    private static String awaitOutput(CompletableFuture<String> output) {
+        try {
+            return output.get(5, TimeUnit.SECONDS);
+        } catch (InterruptedException exception) {
+            Thread.currentThread().interrupt();
+            return "";
+        } catch (ExecutionException | TimeoutException exception) {
+            return "";
+        }
+    }
+
+    private static void terminateProcessTree(Process process) {
+        process.descendants().forEach(child -> child.destroyForcibly());
+        process.destroyForcibly();
     }
 
     Map<String, String> packageSkills(List<String> skillIds, Path targetDirectory) throws IOException {

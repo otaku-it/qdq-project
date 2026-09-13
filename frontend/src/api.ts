@@ -1,4 +1,4 @@
-import type { Blueprint, LauncherJob, UserRole } from './types'
+import type { Blueprint, FeishuMigrationConfig, LauncherJob, UserRole } from './types'
 
 const API_BASE = '/api/v1/launcher'
 
@@ -34,4 +34,9 @@ export const launcherApi = {
   getJob: (id: string) => request<LauncherJob>(`/jobs/${id}`),
   continueJob: (id: string) => request<LauncherJob>(`/jobs/${id}/continue`, { method: 'POST' }),
   retryJob: (id: string) => request<LauncherJob>(`/jobs/${id}/retry`, { method: 'POST' }),
+  getMigrationConfig: (tenantName: string, role: UserRole) => request<FeishuMigrationConfig>(`/migration-config?tenantName=${encodeURIComponent(tenantName)}&role=${encodeURIComponent(role)}`),
+  saveMigrationConfig: (payload: { tenantName: string; role: UserRole; appId: string; appSecret: string; knowledgeBaseUrl: string }) => request<FeishuMigrationConfig>('/migration-config', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  }),
 }

@@ -27,6 +27,18 @@ export interface Blueprint {
   skills: AgentSkill[]
 }
 
+export interface FeishuMigrationConfig {
+  tenantName: string
+  appId: string
+  knowledgeBaseUrl: string
+  parentWikiToken: string
+  spaceId: string
+  verificationStatus: 'NOT_CONFIGURED' | 'VERIFIED' | 'INVALID_CREDENTIALS' | 'NO_ACCESS' | 'VERIFY_PENDING'
+  verificationMessage: string
+  configured: boolean
+  updatedAt: string | null
+}
+
 export type JobStatus = 'RUNNING' | 'NEEDS_USER_ACTION' | 'SUCCEEDED' | 'FAILED'
 export type StepStatus = 'PENDING' | 'RUNNING' | 'WAITING_USER' | 'SUCCEEDED' | 'FAILED'
 export type DeliveryStatus = 'PENDING' | 'PROVISIONING' | 'WAITING_AUTHORIZATION' | 'READY' | 'FAILED'

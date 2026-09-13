@@ -1,10 +1,85 @@
 import { chromium } from 'playwright-core'
+import { spawn } from 'node:child_process'
+import { existsSync } from 'node:fs'
 import { resolve } from 'node:path'
 
 const WORK_URL = process.env.DOUBAO_WORK_URL || 'https://www.doubao.com/chat/skills?channel=RYQ5f'
 const WORK_ORIGIN = new URL(WORK_URL).origin
 const CDP_ENDPOINT = process.env.DOUBAO_CDP_ENDPOINT
 const USER_DATA_DIR = process.env.DOUBAO_USER_DATA_DIR || resolve(process.cwd(), '.doubao-profile')
+const configuredTimeout = (value, fallback) => {
+  const parsed = Number(value)
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback
+}
+const AUTO_CDP_PORT = configuredTimeout(process.env.DOUBAO_AUTO_CDP_PORT, 9222)
+const AUTO_CDP_ENDPOINT = `http://127.0.0.1:${AUTO_CDP_PORT}`
+const SHOULD_AUTO_CDP = !CDP_ENDPOINT && !/^https?:\/\/127\.0\.0\.1(?::|\/)/i.test(WORK_URL)
+const BROWSER_LAUNCH_TIMEOUT_MS = configuredTimeout(process.env.DOUBAO_BROWSER_LAUNCH_TIMEOUT_MS, 20_000)
+const NAVIGATION_TIMEOUT_MS = configuredTimeout(process.env.DOUBAO_NAVIGATION_TIMEOUT_MS, 30_000)
+const CHROME_EXECUTABLE_PATH = process.env.DOUBAO_CHROME_EXECUTABLE_PATH
+
+function resolveChromeExecutable() {
+  if (CHROME_EXECUTABLE_PATH) return CHROME_EXECUTABLE_PATH
+  const candidates = process.platform === 'darwin'
+    ? ['/Applications/Google Chrome.app/Contents/MacOS/Google Chrome']
+    : process.platform === 'win32'
+      ? [
+          `${process.env.PROGRAMFILES || ''}\\Google\\Chrome\\Application\\chrome.exe`,
+          `${process.env['PROGRAMFILES(X86)'] || ''}\\Google\\Chrome\\Application\\chrome.exe`,
+          `${process.env.LOCALAPPDATA || ''}\\Google\\Chrome\\Application\\chrome.exe`,
+        ]
+      : ['/usr/bin/google-chrome', '/usr/bin/google-chrome-stable', '/usr/bin/chromium', '/usr/bin/chromium-browser']
+  return candidates.find((candidate) => candidate && existsSync(candidate))
+}
+
+async function connectToCdp(endpoint) {
+  await ensureCdpTarget(endpoint)
+  const browser = await chromium.connectOverCDP(endpoint, { timeout: BROWSER_LAUNCH_TIMEOUT_MS })
+  const context = browser.contexts()[0]
+  if (!context) throw new Error('CDP 浏览器没有可用上下文')
+  context.setDefaultTimeout(NAVIGATION_TIMEOUT_MS)
+  context.setDefaultNavigationTimeout(NAVIGATION_TIMEOUT_MS)
+  return { browser, context, ownsContext: false }
+}
+
+async function launchStandaloneCdpBrowser() {
+  const executablePath = resolveChromeExecutable()
+  if (!executablePath) {
+    throw new Error('未找到 Google Chrome，请通过 DOUBAO_CHROME_EXECUTABLE_PATH 配置浏览器路径')
+  }
+
+  // 独立 Chrome 只开放 CDP 端口，避免 launchPersistentContext 默认的调试管道与
+  // remote-debugging-port 同时存在，导致豆包工作台渲染进程高 CPU、页面永久 loading。
+  const chromeProcess = spawn(executablePath, [
+    `--remote-debugging-port=${AUTO_CDP_PORT}`,
+    '--remote-debugging-address=127.0.0.1',
+    `--user-data-dir=${USER_DATA_DIR}`,
+    '--no-first-run',
+    '--no-default-browser-check',
+    WORK_URL,
+  ], {
+    detached: true,
+    stdio: 'ignore',
+  })
+  chromeProcess.unref()
+
+  const deadline = Date.now() + BROWSER_LAUNCH_TIMEOUT_MS
+  let lastFailure
+  while (Date.now() < deadline) {
+    if (chromeProcess.exitCode !== null) {
+      throw new Error(`Chrome 启动后立即退出 (${chromeProcess.exitCode})，请确认浏览器用户目录未被占用`)
+    }
+    try {
+      const handle = await connectToCdp(AUTO_CDP_ENDPOINT)
+      return { ...handle, ownsBrowserProcess: true }
+    } catch (error) {
+      lastFailure = error
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 250))
+    }
+  }
+  const detail = lastFailure instanceof Error ? `：${lastFailure.message}` : ''
+  throw new Error(`Chrome 启动超时${detail}`)
+}
 
 async function readPayload() {
   const chunks = []
@@ -30,23 +105,37 @@ async function ensureCdpTarget(endpoint) {
 
 async function openBrowser() {
   let cdpFailure
-  if (CDP_ENDPOINT) {
-    try {
-      await ensureCdpTarget(CDP_ENDPOINT)
-      const browser = await chromium.connectOverCDP(CDP_ENDPOINT)
-      const context = browser.contexts()[0]
-      if (!context) throw new Error('CDP 浏览器没有可用上下文')
-      return { context, ownsContext: false }
-    } catch (error) {
+  const cdpEndpoint = CDP_ENDPOINT || (SHOULD_AUTO_CDP ? AUTO_CDP_ENDPOINT : null)
+  try {
+      if (cdpEndpoint) {
+        const handle = await connectToCdp(cdpEndpoint)
+        return { ...handle, ownsContext: false }
+      }
+  } catch (error) {
       cdpFailure = error
+  }
+
+  if (SHOULD_AUTO_CDP) {
+    try {
+      return await launchStandaloneCdpBrowser()
+    } catch (error) {
+      const cdpMessage = cdpFailure instanceof Error ? `CDP 连接失败：${cdpFailure.message}；` : ''
+      const launchMessage = error instanceof Error ? error.message : String(error)
+      throw new Error(`${cdpMessage}浏览器自动启动失败：${launchMessage}`)
     }
   }
 
   try {
-    const context = await chromium.launchPersistentContext(USER_DATA_DIR, {
-      channel: 'chrome',
+    const launchOptions = {
       headless: false,
-    })
+      timeout: BROWSER_LAUNCH_TIMEOUT_MS,
+      args: ['--no-first-run', '--no-default-browser-check'],
+    }
+    if (CHROME_EXECUTABLE_PATH) launchOptions.executablePath = CHROME_EXECUTABLE_PATH
+    else launchOptions.channel = 'chrome'
+    const context = await chromium.launchPersistentContext(USER_DATA_DIR, launchOptions)
+    context.setDefaultTimeout(NAVIGATION_TIMEOUT_MS)
+    context.setDefaultNavigationTimeout(NAVIGATION_TIMEOUT_MS)
     return { context, ownsContext: true }
   } catch (error) {
     const cdpMessage = cdpFailure instanceof Error ? `CDP 连接失败：${cdpFailure.message}；` : ''
@@ -103,6 +192,30 @@ async function findAuthorizationPage(context) {
   return null
 }
 
+async function normalizeAuthorizationPages(context) {
+  const authorizationPages = []
+  for (const page of context.pages()) {
+    if (!isAuthorizationOrigin(page.url())) continue
+    const isFeishuPage = /^https?:\/\/(accounts|passport)\.feishu\.cn(?:\/|$)/i.test(page.url())
+    const loginPrompt = page.getByText(/扫码登录|扫码授权|扫描二维码|使用飞书.{0,8}扫码|登录飞书账号|登录豆包/).first()
+    if (isFeishuPage || await loginPrompt.isVisible().catch(() => false)) {
+      authorizationPages.push(page)
+    }
+  }
+  if (authorizationPages.length <= 1) {
+    return { page: authorizationPages[0] ?? null, duplicatesClosed: 0 }
+  }
+
+  // Chrome 复用已有用户目录时可能同时保留多个 OAuth 标签页。只保留最新的一页，
+  // 避免用户误扫旧二维码，也避免“继续”请求重复触发同一 Skill。
+  const activePage = authorizationPages.at(-1)
+  let duplicatesClosed = 0
+  for (const duplicatePage of authorizationPages.slice(0, -1)) {
+    await duplicatePage.close().then(() => { duplicatesClosed += 1 }).catch(() => {})
+  }
+  return { page: activePage, duplicatesClosed }
+}
+
 async function findLoginTrigger(page) {
   const candidates = [
     page.getByRole('button', { name: '登录', exact: true }).first(),
@@ -116,7 +229,8 @@ async function findLoginTrigger(page) {
 }
 
 async function openLoginIfRequired(context, workPage) {
-  const authorizationPage = await findAuthorizationPage(context)
+  const authorization = await normalizeAuthorizationPages(context)
+  const authorizationPage = authorization.page
   if (authorizationPage) return authorizationPage
 
   const loginTrigger = await findLoginTrigger(workPage)
@@ -124,7 +238,7 @@ async function openLoginIfRequired(context, workPage) {
 
   await loginTrigger.click()
   await workPage.waitForTimeout(1_000)
-  return await findAuthorizationPage(context) ?? workPage
+  return (await normalizeAuthorizationPages(context)).page ?? workPage
 }
 
 function isDoubaoTaskUrl(value) {
@@ -248,7 +362,10 @@ async function openWorkPage(context) {
     }) ?? await context.newPage()
   }
   if (!page.url().startsWith(`${WORK_ORIGIN}/chat`)) {
-    await page.goto(WORK_URL, { waitUntil: 'domcontentloaded' })
+    await page.goto(WORK_URL, { waitUntil: 'domcontentloaded', timeout: NAVIGATION_TIMEOUT_MS })
+  } else if (page.url().includes('/chat/skills')) {
+    // 复用的工作台标签可能停留在首屏 loading，刷新一次让登录入口和输入框重新渲染。
+    await page.reload({ waitUntil: 'domcontentloaded', timeout: NAVIGATION_TIMEOUT_MS }).catch(() => {})
   }
   await page.bringToFront()
   await page.waitForTimeout(1_000)
@@ -437,14 +554,15 @@ try {
       taskUrl: legacyTask.page.url(),
     }
   } else {
-    const existingAuthorization = await findAuthorizationPage(browserHandle.context)
+    const authorizationState = await normalizeAuthorizationPages(browserHandle.context)
+    const existingAuthorization = authorizationState.page
     if (existingAuthorization) {
       const normalized = await closeDuplicateWorkPages(
         browserHandle.context,
         isDoubaoWorkPage(existingAuthorization) ? existingAuthorization : null,
       )
       await existingAuthorization.bringToFront()
-      workerResult = waitingForLogin(normalized.duplicatesClosed)
+      workerResult = waitingForLogin(authorizationState.duplicatesClosed + normalized.duplicatesClosed)
     } else {
       const workPage = existingTask
         ? { page: existingTask.page, duplicatesClosed: existingTask.duplicatesClosed }
@@ -513,19 +631,24 @@ try {
   }
 } catch (error) {
   const errorMessage = error instanceof Error ? error.message : String(error)
-  const browserUnavailable = /Target page, context or browser has been closed|ECONNREFUSED|connectOverCDP|浏览器自动启动失败/.test(errorMessage)
+  const browserUnavailable = /Target page, context or browser has been closed|ECONNREFUSED|connectOverCDP|浏览器自动启动失败|工作台页面结构未就绪|未找到豆包工作任务输入框/.test(errorMessage)
   workerResult = {
     success: false,
     requiresUserAction: browserUnavailable,
     message: browserUnavailable
-      ? '受控浏览器已关闭或会话已失效，已尝试重新打开；请完成登录后继续'
+      ? (errorMessage.includes('页面结构') || errorMessage.includes('输入框')
+        ? '豆包工作台页面加载超时，浏览器窗口已保留；请刷新页面后点击“继续”重试'
+        : '受控浏览器已关闭或会话已失效，已尝试重新打开；请完成登录后继续')
       : errorMessage,
     initializedSkillIds: [],
     taskUrl: null,
   }
   workerExitCode = browserUnavailable ? 0 : 1
 } finally {
-  if (browserHandle?.ownsContext) await browserHandle.context.close().catch(() => {})
+  // 保留等待扫码时的浏览器窗口，点击继续后通过 CDP 复用同一会话。
+  if (browserHandle?.ownsContext && !workerResult?.requiresUserAction) {
+    await browserHandle.context.close().catch(() => {})
+  }
 }
 
 await new Promise((resolve, reject) => {

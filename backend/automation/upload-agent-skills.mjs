@@ -1,10 +1,86 @@
 import { chromium } from 'playwright-core'
+import { spawn } from 'node:child_process'
+import { existsSync } from 'node:fs'
 import { resolve } from 'node:path'
 
 const ADMIN_URL = process.env.DOUBAO_ADMIN_URL || 'https://admin.doubao.com/ask/doubao/builtin-skill'
 const CDP_ENDPOINT = process.env.DOUBAO_CDP_ENDPOINT
 const USER_DATA_DIR = process.env.DOUBAO_USER_DATA_DIR || resolve(process.cwd(), '.doubao-profile')
 const AUTHORIZATION_WAIT_MS = Number(process.env.DOUBAO_AUTHORIZATION_WAIT_MS || 45_000)
+const configuredTimeout = (value, fallback) => {
+  const parsed = Number(value)
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback
+}
+const AUTO_CDP_PORT = configuredTimeout(process.env.DOUBAO_AUTO_CDP_PORT, 9222)
+const AUTO_CDP_ENDPOINT = `http://127.0.0.1:${AUTO_CDP_PORT}`
+const SHOULD_AUTO_CDP = !CDP_ENDPOINT && !/^https?:\/\/127\.0\.0\.1(?::|\/)/i.test(ADMIN_URL)
+const BROWSER_LAUNCH_TIMEOUT_MS = configuredTimeout(process.env.DOUBAO_BROWSER_LAUNCH_TIMEOUT_MS, 20_000)
+const NAVIGATION_TIMEOUT_MS = configuredTimeout(process.env.DOUBAO_NAVIGATION_TIMEOUT_MS, 30_000)
+const CHROME_EXECUTABLE_PATH = process.env.DOUBAO_CHROME_EXECUTABLE_PATH
+
+function resolveChromeExecutable() {
+  if (CHROME_EXECUTABLE_PATH) return CHROME_EXECUTABLE_PATH
+  const candidates = process.platform === 'darwin'
+    ? ['/Applications/Google Chrome.app/Contents/MacOS/Google Chrome']
+    : process.platform === 'win32'
+      ? [
+          `${process.env.PROGRAMFILES || ''}\\Google\\Chrome\\Application\\chrome.exe`,
+          `${process.env['PROGRAMFILES(X86)'] || ''}\\Google\\Chrome\\Application\\chrome.exe`,
+          `${process.env.LOCALAPPDATA || ''}\\Google\\Chrome\\Application\\chrome.exe`,
+        ]
+      : ['/usr/bin/google-chrome', '/usr/bin/google-chrome-stable', '/usr/bin/chromium', '/usr/bin/chromium-browser']
+  return candidates.find((candidate) => candidate && existsSync(candidate))
+}
+
+async function connectToCdp(endpoint) {
+  await ensureCdpTarget(endpoint)
+  const browser = await chromium.connectOverCDP(endpoint, { timeout: BROWSER_LAUNCH_TIMEOUT_MS })
+  const context = browser.contexts()[0]
+  if (!context) throw new Error('CDP 浏览器没有可用上下文')
+  context.setDefaultTimeout(NAVIGATION_TIMEOUT_MS)
+  context.setDefaultNavigationTimeout(NAVIGATION_TIMEOUT_MS)
+  return { browser, context, ownsContext: false }
+}
+
+async function launchStandaloneCdpBrowser() {
+  const executablePath = resolveChromeExecutable()
+  if (!executablePath) {
+    throw new Error('未找到 Google Chrome，请通过 DOUBAO_CHROME_EXECUTABLE_PATH 配置浏览器路径')
+  }
+
+  // Playwright 自带的持久化启动会使用 remote-debugging-pipe。不能再给同一进程追加
+  // remote-debugging-port，否则 Chrome 会同时启用两套调试传输，真实豆包 iframe 可能
+  // 出现高 CPU 和永久 loading。这里独立启动 Chrome，再让 Playwright 只通过 CDP 连接。
+  const chromeProcess = spawn(executablePath, [
+    `--remote-debugging-port=${AUTO_CDP_PORT}`,
+    '--remote-debugging-address=127.0.0.1',
+    `--user-data-dir=${USER_DATA_DIR}`,
+    '--no-first-run',
+    '--no-default-browser-check',
+    ADMIN_URL,
+  ], {
+    detached: true,
+    stdio: 'ignore',
+  })
+  chromeProcess.unref()
+
+  const deadline = Date.now() + BROWSER_LAUNCH_TIMEOUT_MS
+  let lastFailure
+  while (Date.now() < deadline) {
+    if (chromeProcess.exitCode !== null) {
+      throw new Error(`Chrome 启动后立即退出 (${chromeProcess.exitCode})，请确认浏览器用户目录未被占用`)
+    }
+    try {
+      const handle = await connectToCdp(AUTO_CDP_ENDPOINT)
+      return { ...handle, ownsBrowserProcess: true }
+    } catch (error) {
+      lastFailure = error
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 250))
+    }
+  }
+  const detail = lastFailure instanceof Error ? `：${lastFailure.message}` : ''
+  throw new Error(`Chrome 启动超时${detail}`)
+}
 
 async function readPayload() {
   const chunks = []
@@ -30,24 +106,44 @@ async function ensureCdpTarget(endpoint) {
 
 async function openBrowser() {
   let cdpFailure
+  // 继续任务时优先复用上一次等待扫码的浏览器。显式 CDP 地址优先；本地自动启动
+  // 的受控 Chrome 使用固定端口，这样 Worker 退出后浏览器仍可保留给用户扫码。
+  const cdpEndpoint = CDP_ENDPOINT || (SHOULD_AUTO_CDP ? AUTO_CDP_ENDPOINT : null)
+  try {
+    if (cdpEndpoint) {
+      return await connectToCdp(cdpEndpoint)
+    }
+  } catch (error) {
+    cdpFailure = error
+  }
   if (CDP_ENDPOINT) {
     try {
       // Chrome 窗口全部关闭时进程和 9222 仍可能存活，但没有 page target；先自动恢复一个页面。
-      await ensureCdpTarget(CDP_ENDPOINT)
-      const browser = await chromium.connectOverCDP(CDP_ENDPOINT)
-      const context = browser.contexts()[0]
-      if (!context) throw new Error('CDP 浏览器没有可用上下文')
-      // CDP 模式连接的是用户正在使用的 Chrome。Worker 退出即可断开连接，禁止关闭浏览器。
-      return { browser: null, context, ownsContext: false }
+      return await connectToCdp(CDP_ENDPOINT)
     } catch (error) {
       cdpFailure = error
     }
   }
+  if (SHOULD_AUTO_CDP) {
+    try {
+      return await launchStandaloneCdpBrowser()
+    } catch (error) {
+      const cdpMessage = cdpFailure instanceof Error ? `CDP 连接失败：${cdpFailure.message}；` : ''
+      const launchMessage = error instanceof Error ? error.message : String(error)
+      throw new Error(`${cdpMessage}浏览器自动启动失败：${launchMessage}`)
+    }
+  }
   try {
-    const context = await chromium.launchPersistentContext(USER_DATA_DIR, {
-      channel: 'chrome',
+    const launchOptions = {
       headless: false,
-    })
+      timeout: BROWSER_LAUNCH_TIMEOUT_MS,
+      args: ['--no-first-run', '--no-default-browser-check'],
+    }
+    if (CHROME_EXECUTABLE_PATH) launchOptions.executablePath = CHROME_EXECUTABLE_PATH
+    else launchOptions.channel = 'chrome'
+    const context = await chromium.launchPersistentContext(USER_DATA_DIR, launchOptions)
+    context.setDefaultTimeout(NAVIGATION_TIMEOUT_MS)
+    context.setDefaultNavigationTimeout(NAVIGATION_TIMEOUT_MS)
     return { browser: null, context, ownsContext: true }
   } catch (error) {
     const cdpMessage = cdpFailure instanceof Error ? `CDP 连接失败：${cdpFailure.message}；` : ''
@@ -123,6 +219,8 @@ async function hasListFrame(page) {
 
 async function waitForAdminOrAuthorization(context, page, timeoutMs = AUTHORIZATION_WAIT_MS) {
   const deadline = Date.now() + timeoutMs
+  const reloadDeadline = Date.now() + 8_000
+  let reloaded = false
   let duplicatesClosed = 0
   while (Date.now() < deadline) {
     const authorization = await normalizeAuthorizationPages(context)
@@ -132,6 +230,12 @@ async function waitForAdminOrAuthorization(context, page, timeoutMs = AUTHORIZAT
     }
     if (!page.isClosed() && await hasListFrame(page)) {
       return { type: 'ready', page, duplicatesClosed }
+    }
+    // 豆包后台偶发停留在首屏 loading（旧标签页缓存或网络请求中断）。只对同一后台页
+    // 自动刷新一次，避免用户看到永久转圈，也不重复创建授权窗口。
+    if (!reloaded && Date.now() >= reloadDeadline && !page.isClosed()) {
+      reloaded = true
+      await page.reload({ waitUntil: 'domcontentloaded', timeout: NAVIGATION_TIMEOUT_MS }).catch(() => {})
     }
     await new Promise((resolve) => setTimeout(resolve, 250))
   }
@@ -306,7 +410,7 @@ try {
     let page = await findAdminPage(browserHandle.context)
     if (!page) {
       page = await browserHandle.context.newPage()
-      await page.goto(ADMIN_URL, { waitUntil: 'domcontentloaded' })
+      await page.goto(ADMIN_URL, { waitUntil: 'domcontentloaded', timeout: NAVIGATION_TIMEOUT_MS })
     }
     const state = await waitForAdminOrAuthorization(browserHandle.context, page)
     if (state.type === 'authorization') {
@@ -334,18 +438,24 @@ try {
   }
 } catch (error) {
   const errorMessage = error instanceof Error ? error.message : String(error)
-  const browserUnavailable = /Target page, context or browser has been closed|ECONNREFUSED|connectOverCDP|Browser\.setDownloadBehavior|浏览器自动启动失败/.test(errorMessage)
+  const browserUnavailable = /Target page, context or browser has been closed|ECONNREFUSED|connectOverCDP|Browser\.setDownloadBehavior|浏览器自动启动失败|企业后台页面结构未就绪/.test(errorMessage)
   workerResult = {
     success: false,
     requiresUserAction: browserUnavailable,
     message: browserUnavailable
-      ? '受控浏览器已关闭或会话已失效，已尝试重新打开；请完成飞书登录后继续'
+      ? (errorMessage.includes('页面结构未就绪')
+        ? '豆包企业后台页面加载超时，浏览器窗口已保留；请刷新页面后点击“继续”重试'
+        : '受控浏览器已关闭或会话已失效，已尝试重新打开；请完成飞书登录后继续')
       : errorMessage,
     uploadedSkillIds: [],
   }
   workerExitCode = browserUnavailable ? 0 : 1
 } finally {
-  if (browserHandle?.ownsContext) await browserHandle.context.close().catch(() => {})
+  // 等待用户扫码时不能关闭受控浏览器，否则前端提示用户扫码但窗口已经消失。
+  // 下一次“继续”会通过自动 CDP 端口复用该浏览器；成功或失败则正常清理上下文。
+  if (browserHandle?.ownsContext && !workerResult?.requiresUserAction) {
+    await browserHandle.context.close().catch(() => {})
+  }
 }
 
 // CDP 连接会保持 Node 事件循环存活。先完整写出 JSON，再显式退出，只断开 Worker，不关闭用户 Chrome。

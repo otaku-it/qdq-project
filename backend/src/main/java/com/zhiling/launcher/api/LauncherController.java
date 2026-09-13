@@ -3,6 +3,7 @@ package com.zhiling.launcher.api;
 import com.zhiling.launcher.api.LauncherViews.BlueprintView;
 import com.zhiling.launcher.api.LauncherViews.JobView;
 import com.zhiling.launcher.service.LauncherJobService;
+import com.zhiling.launcher.service.FeishuMigrationConfigService;
 import jakarta.validation.Valid;
 import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -10,6 +11,7 @@ import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
 
@@ -24,9 +26,11 @@ import org.springframework.web.bind.annotation.RestController;
 public class LauncherController {
 
     private final LauncherJobService service;
+    private final FeishuMigrationConfigService migrationConfigService;
 
-    public LauncherController(LauncherJobService service) {
+    public LauncherController(LauncherJobService service, FeishuMigrationConfigService migrationConfigService) {
         this.service = service;
+        this.migrationConfigService = migrationConfigService;
     }
 
     @GetMapping("/blueprint")
@@ -70,5 +74,18 @@ public class LauncherController {
      */
     public JobView retryJob(@PathVariable String id) {
         return service.retry(id);
+    }
+
+    @GetMapping("/migration-config")
+    /** 获取当前租户的飞书文档迁移配置，不返回 app_secret。 */
+    public FeishuMigrationConfigView getMigrationConfig(@RequestParam String tenantName, @RequestParam String role) {
+        migrationConfigService.requireAdmin(role);
+        return migrationConfigService.get(tenantName);
+    }
+
+    @PostMapping("/migration-config")
+    /** 保存租户级飞书迁移配置并解析知识库 URL。 */
+    public FeishuMigrationConfigView saveMigrationConfig(@Valid @RequestBody FeishuMigrationConfigRequest request) {
+        return migrationConfigService.save(request);
     }
 }
