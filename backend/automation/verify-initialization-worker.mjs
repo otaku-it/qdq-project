@@ -4,8 +4,17 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { spawn } from 'node:child_process'
 
-const fixture = `<!doctype html><html><body>
-<nav><div id="new-task">新工作任务</div></nav>
+const fixture = `<!doctype html><html><head><style>
+  /* 与真实豆包项目行一致：新对话入口仅在项目行悬停时显示。 */
+  .project-actions { display: none; }
+  [data-project-id]:hover .project-actions { display: flex; }
+</style></head><body>
+<nav><div id="new-task">新工作任务</div><button id="new-project" aria-label="新建项目" hidden>新建项目</button><button id="visible-new-project"><span>创建新项目</span></button></nav>
+<div id="project-dialog" role="dialog" aria-label="创建项目" hidden>
+  <label>项目名称<input id="project-name" aria-label="项目名称" /></label>
+  <button id="create-project">创建</button>
+</div>
+<div id="projects"></div>
 <main>
   <div id="composer" role="textbox" contenteditable="true"></div>
   <button id="more-skills">更多技能</button>
@@ -28,9 +37,14 @@ const picker = document.querySelector('#picker');
 const messages = document.querySelector('#messages');
 const conversations = document.querySelector('#conversations');
 const conversationMenu = document.querySelector('#conversation-menu');
+const projects = document.querySelector('#projects');
+const projectDialog = document.querySelector('#project-dialog');
+const projectName = document.querySelector('#project-name');
 const records = [];
 let taskCounter = 0;
 let selectedConversation = null;
+let activeProject = null;
+let projectCounter = 0;
 const resumeFixture = new URLSearchParams(location.search).has('resume');
 function addConversation(taskId, skillId) {
   const conversation = document.createElement('a');
@@ -45,9 +59,9 @@ function addConversation(taskId, skillId) {
     conversationMenu.hidden = false;
   };
   conversation.append(menuTrigger);
-  conversations.append(conversation);
+  (activeProject?.querySelector('.project-conversations') ?? conversations).append(conversation);
 }
-document.querySelector('#new-task').onclick = () => {
+function openTask() {
   composer.replaceChildren();
   // 模拟豆包切换会话时短暂残留上一会话正文，Worker 发送前必须清理它。
   const stalePrompt = document.createElement('span');
@@ -56,6 +70,28 @@ document.querySelector('#new-task').onclick = () => {
   picker.hidden = true;
   // 豆包切换新任务后仍可能缓存上个会话的文本节点。
   history.pushState({}, '', '/chat?channel=test');
+}
+function createProject(name) {
+  projectCounter += 1;
+  const project = document.createElement('section');
+  project.dataset.projectId = 'fixture-project-' + projectCounter;
+  project.innerHTML = '<button type="button" aria-expanded="true">' + name + '</button><div class="project-actions"><button type="button" aria-label="新对话">新对话</button></div><div class="project-conversations"></div>';
+  project.querySelector('button[aria-expanded]').onclick = (event) => {
+    const expanded = event.currentTarget.getAttribute('aria-expanded') !== 'false';
+    event.currentTarget.setAttribute('aria-expanded', String(!expanded));
+    project.querySelector('.project-conversations').hidden = expanded;
+  };
+  project.querySelector('[aria-label="新对话"]').onclick = () => { activeProject = project; openTask(); };
+  projects.append(project);
+  return project;
+}
+document.querySelector('#new-task').onclick = openTask;
+function openProjectDialog() { projectDialog.hidden = false; projectName.focus(); }
+document.querySelector('#new-project').onclick = openProjectDialog;
+document.querySelector('#visible-new-project').onclick = openProjectDialog;
+document.querySelector('#create-project').onclick = () => {
+  createProject(projectName.value);
+  projectDialog.hidden = true;
 };
 document.querySelector('#more-skills').onclick = () => { picker.hidden = false; };
 for (const option of document.querySelectorAll('[data-skill]')) {
@@ -78,7 +114,7 @@ composer.onkeydown = (event) => {
     .filter((node) => node.nodeType === Node.TEXT_NODE)
     .map((node) => node.textContent)
     .join('');
-  records.push({ attachedSkills, prompt });
+  records.push({ attachedSkills, prompt, projectId: activeProject?.dataset.projectId ?? null });
   const message = document.createElement('div');
   // 模拟豆包真实渲染：Skill 标签和正文相邻时，斜杠前空白会被折叠掉。
   message.textContent = composer.textContent.replace(' / ', ' /');
@@ -100,6 +136,7 @@ document.querySelector('#pin-task').onclick = () => {
   history.replaceState({}, '', location.pathname + '?records=' + encodeURIComponent(JSON.stringify(records)));
 };
 if (resumeFixture) {
+  activeProject = createProject('智灵技能包');
   localStorage.setItem(
     'zhiling-launcher:initialization:fixture-resume-job-1',
     JSON.stringify({ 'project-plan': location.origin + '/chat/local_legacy_project-plan' }),
@@ -108,6 +145,7 @@ if (resumeFixture) {
   records.push({
     attachedSkills: ['project-plan'],
     prompt: '[智灵启动器任务 fixture-resume-job-1 / project-plan]',
+    projectId: activeProject.dataset.projectId,
   });
   const existingMessage = document.createElement('div');
   existingMessage.textContent = '[智灵启动器任务 fixture-resume-job-1 /project-plan]';
@@ -173,14 +211,15 @@ const taskUrl = new URL(output.taskUrl)
 if (!taskUrl.pathname.endsWith('/chat/fixture-task-2')) throw new Error(stdout)
 const taskRecords = JSON.parse(taskUrl.searchParams.get('records') ?? '[]')
 if (taskRecords.length !== 2) throw new Error(stdout)
-if (!taskRecords.every((record) => record.pinned === true)) throw new Error(stdout)
+if (taskRecords.some((record) => record.pinned === true)) throw new Error(stdout)
 if (taskRecords[0].attachedSkills.join(',') !== 'project-plan') throw new Error(stdout)
 if (taskRecords[1].attachedSkills.join(',') !== 'requirement-analysis') throw new Error(stdout)
 if (taskRecords[0].prompt !== '') throw new Error(stdout)
 if (taskRecords[1].prompt !== '') throw new Error(stdout)
+if (!taskRecords.every((record) => record.projectId === 'fixture-project-1')) throw new Error(stdout)
 if (!output.initializedSkillIds.includes('project-plan')) throw new Error(stdout)
 if (!output.initializedSkillIds.includes('requirement-analysis')) throw new Error(stdout)
-if (!/已创建并置顶 2 个豆包工作任务/.test(output.message)) throw new Error(stdout)
+if (!/已创建豆包项目“智灵技能包”，并在项目内创建 2 个工作任务/.test(output.message)) throw new Error(stdout)
 process.stdout.write('Playwright per-Skill initialization Worker E2E verification passed\n')
 
 const resumeDirectory = await mkdtemp(join(tmpdir(), 'zhiling-initialization-resume-test-'))
@@ -211,9 +250,10 @@ const resumeOutput = JSON.parse(resumeStdout)
 if (!resumeOutput.success) throw new Error(resumeStdout)
 const resumeRecords = JSON.parse(new URL(resumeOutput.taskUrl).searchParams.get('records') ?? '[]')
 if (resumeRecords.length !== 2) throw new Error(resumeStdout)
-if (!resumeRecords.every((record) => record.pinned === true)) throw new Error(resumeStdout)
+if (resumeRecords.some((record) => record.pinned === true)) throw new Error(resumeStdout)
 if (resumeRecords.filter((record) => record.attachedSkills.includes('project-plan')).length !== 1) throw new Error(resumeStdout)
 if (resumeRecords.filter((record) => record.attachedSkills.includes('requirement-analysis')).length !== 1) throw new Error(resumeStdout)
+if (!resumeRecords.every((record) => record.projectId === 'fixture-project-1')) throw new Error(resumeStdout)
 process.stdout.write('Playwright partial-failure retry verification passed\n')
 
 const sidebarResumeDirectory = await mkdtemp(join(tmpdir(), 'zhiling-initialization-sidebar-resume-test-'))
@@ -246,7 +286,8 @@ const sidebarResumeRecords = JSON.parse(new URL(sidebarResumeOutput.taskUrl).sea
 if (sidebarResumeRecords.length !== 2) throw new Error(sidebarResumeStdout)
 if (sidebarResumeRecords.filter((record) => record.attachedSkills.includes('project-plan')).length !== 1) throw new Error(sidebarResumeStdout)
 if (sidebarResumeRecords.filter((record) => record.attachedSkills.includes('requirement-analysis')).length !== 1) throw new Error(sidebarResumeStdout)
-if (!sidebarResumeRecords.every((record) => record.pinned === true)) throw new Error(sidebarResumeStdout)
+if (sidebarResumeRecords.some((record) => record.pinned === true)) throw new Error(sidebarResumeStdout)
+if (!sidebarResumeRecords.every((record) => record.projectId === 'fixture-project-1')) throw new Error(sidebarResumeStdout)
 process.stdout.write('Playwright sidebar recovery verification passed\n')
 
 const unauthDirectory = await mkdtemp(join(tmpdir(), 'zhiling-initialization-unauth-test-'))

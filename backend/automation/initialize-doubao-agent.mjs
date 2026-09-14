@@ -4,6 +4,7 @@ import { NAVIGATION_TIMEOUT_MS, openDoubaoBrowser } from './doubao-browser.mjs'
 const WORK_URL = process.env.DOUBAO_WORK_URL || 'https://www.doubao.com/chat/skills?channel=RYQ5f'
 const WORK_ORIGIN = new URL(WORK_URL).origin
 const USER_DATA_DIR = process.env.DOUBAO_USER_DATA_DIR || resolve(process.cwd(), '.doubao-profile')
+const PROJECT_NAME = process.env.DOUBAO_PROJECT_NAME || '智灵技能包'
 
 async function readPayload() {
   const chunks = []
@@ -260,6 +261,114 @@ async function openNewTask(page) {
   await findComposer(page)
 }
 
+async function findProject(page, projectName) {
+  const projects = page.locator('[data-project-id]')
+  const count = await projects.count()
+  for (let index = 0; index < count; index += 1) {
+    const project = projects.nth(index)
+    if (await project.getByText(projectName, { exact: true }).count() > 0) return project
+  }
+  return null
+}
+
+async function waitForProject(page, projectName, timeoutMs = 15_000) {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    const project = await findProject(page, projectName)
+    if (project) return project
+    await page.waitForTimeout(200)
+  }
+  throw new Error(`未找到豆包项目：${projectName}`)
+}
+
+async function findVisibleProjectCreationTrigger(page) {
+  // 豆包同时渲染桌面图标入口和侧边栏文字入口。图标在没有悬停时会保留在 DOM 中但
+  // display:none，不能以它作为首选，否则 locator.waitFor 会一直超时。
+  const candidates = [
+    page.getByText('创建新项目', { exact: true }),
+    page.locator('button[aria-label="新建项目"]'),
+    page.getByRole('button', { name: '新建项目', exact: true }),
+  ]
+  for (const candidate of candidates) {
+    const count = await candidate.count()
+    for (let index = 0; index < count; index += 1) {
+      const trigger = candidate.nth(index)
+      if (await trigger.isVisible().catch(() => false)) return trigger
+    }
+  }
+  throw new Error('未找到可见的豆包“创建新项目”入口')
+}
+
+/**
+ * 初始化任务统一放入独立项目，避免散落在“最近”会话中。项目名称可通过
+ * DOUBAO_PROJECT_NAME 覆盖；同名项目存在时复用，确保扫码恢复和重试不会重复创建。
+ */
+async function ensureLauncherProject(page) {
+  const existing = await findProject(page, PROJECT_NAME)
+  if (existing) return { project: existing, created: false }
+
+  const newProject = await findVisibleProjectCreationTrigger(page)
+  await newProject.click()
+
+  const dialog = page.getByRole('dialog').last()
+  await dialog.waitFor({ state: 'visible', timeout: 10_000 })
+  const projectNameInput = dialog.getByRole('textbox').first()
+  await projectNameInput.waitFor({ state: 'visible', timeout: 10_000 })
+  await projectNameInput.fill(PROJECT_NAME)
+
+  const createButton = dialog.getByRole('button', { name: /^(创建项目|创建|确认)$/ }).first()
+  await createButton.waitFor({ state: 'visible', timeout: 10_000 })
+  await createButton.click()
+  return { project: await waitForProject(page, PROJECT_NAME), created: true }
+}
+
+/**
+ * 从指定项目内创建会话。
+ *
+ * 豆包在创建项目、切换会话时会重新渲染侧边栏。不能继续使用创建项目时取得的
+ * Locator，否则它可能指向已卸载的项目节点，最终在“新对话”处等待超时。
+ */
+async function openProjectTask(page, projectName) {
+  const project = await waitForProject(page, projectName)
+  const projectToggle = project.locator('button[aria-expanded]').first()
+  if (await projectToggle.getAttribute('aria-expanded').catch(() => null) === 'false') {
+    await projectToggle.click()
+  }
+
+  // “新对话”仅在项目行 hover 时显示。部分版本的豆包会保留 hidden 元素，
+  // force click 仍可能无法命中实际点击区域，因此在普通点击失败时只对该按钮
+  // 使用 DOM click 回退；不会影响项目外的“新工作任务”或管理员上传流程。
+  await project.hover()
+  const newTask = project.locator('button[aria-label="新对话"]').first()
+  try {
+    await newTask.waitFor({ state: 'attached', timeout: 5_000 })
+  } catch {
+    throw new Error(`未能打开项目“${projectName}”的新对话入口，请刷新豆包工作台后重试`)
+  }
+
+  const previousUrl = page.url()
+  let clicked = false
+  try {
+    await newTask.click({ force: true, timeout: 5_000 })
+    clicked = true
+  } catch {
+    // 受控浏览器下的 hover 样式偶发没有同步到可点击区域，直接触发该按钮的
+    // 原生 click，且后续仍通过输入框验证是否真正进入了新会话。
+    clicked = await newTask.evaluate((element) => {
+      element.click()
+      return true
+    }).catch(() => false)
+  }
+  if (!clicked) throw new Error(`无法点击项目“${projectName}”的“新对话”按钮`)
+
+  // 路由改变不是强制条件：部分豆包版本会留在 /chat 并只清空编辑器。
+  // 但短暂等待可确保 SPA 已处理点击，再验证新会话可用控件。
+  await page.waitForURL((url) => url.toString() !== previousUrl, { timeout: 3_000 }).catch(() => {})
+  const moreSkills = page.getByRole('button', { name: '更多技能', exact: true })
+  await moreSkills.waitFor({ state: 'visible', timeout: 20_000 })
+  await findComposer(page)
+}
+
 async function selectEnterpriseSkill(page, skillId) {
   const composer = await findComposer(page)
   const attached = composer.getByRole('button', { name: skillId, exact: true })
@@ -320,45 +429,11 @@ async function submitTask(page, skillId) {
     (url) => isDoubaoTaskUrl(url.toString()) && url.toString() !== previousUrl,
     { timeout: 30_000 },
   )
-  // 豆包先路由到 /chat/local_*，随后才落盘为可出现在左侧列表中的真实会话 ID。
-  // 只有真实 ID 可用于置顶和扫码后的幂等恢复。
+  // 豆包先路由到 /chat/local_*，随后才落盘为可用于扫码后幂等恢复的真实会话 ID。
   if (!isPersistedDoubaoTaskUrl(page.url())) {
     await page.waitForURL((url) => isPersistedDoubaoTaskUrl(url.toString()), { timeout: 30_000 })
   }
   return page.url()
-}
-
-async function pinTask(page, taskUrl) {
-  const url = new URL(taskUrl)
-  const taskId = url.pathname.split('/').filter(Boolean).at(-1)
-  if (!taskId || taskId.startsWith('local_') || !/^[a-zA-Z0-9_-]+$/.test(taskId)) {
-    throw new Error(`无法从豆包任务地址识别会话 ID：${taskUrl}`)
-  }
-
-  const conversation = page.locator(`a[href^="/chat/${taskId}"]`).first()
-  await conversation.waitFor({ state: 'visible', timeout: 20_000 })
-  await conversation.hover()
-
-  const menuTrigger = conversation.locator('button[aria-haspopup="menu"]').first()
-  await menuTrigger.waitFor({ state: 'visible', timeout: 10_000 })
-  await menuTrigger.click()
-
-  const menu = page.locator('[role="menu"]:visible').last()
-  await menu.waitFor({ state: 'visible', timeout: 10_000 })
-  const pinItem = menu.getByRole('menuitem', { name: /^置顶(?:\s|$)/ }).first()
-  if (await pinItem.isVisible().catch(() => false)) {
-    await pinItem.click()
-    await menu.waitFor({ state: 'hidden', timeout: 10_000 })
-    return
-  }
-
-  const unpinItem = menu.getByRole('menuitem', { name: /^取消置顶(?:\s|$)/ }).first()
-  if (await unpinItem.isVisible().catch(() => false)) {
-    await page.keyboard.press('Escape')
-    return
-  }
-  await page.keyboard.press('Escape')
-  throw new Error(`豆包会话 ${taskId} 的操作菜单中未找到“置顶”`)
 }
 
 let browserHandle
@@ -388,7 +463,6 @@ try {
     ? null
     : await findExistingTask(browserHandle.context, legacyMarker)
   if (legacyTask) {
-    await pinTask(legacyTask.page, legacyTask.page.url())
     workerResult = {
       success: true,
       requiresUserAction: false,
@@ -421,6 +495,7 @@ try {
         workerResult = waitingForLogin(workPage.duplicatesClosed + normalized.duplicatesClosed)
       } else {
         try {
+          const projectResult = await ensureLauncherProject(page)
           const taskUrls = []
           for (const skillId of skills) {
             const markerPattern = skillMarkerPattern(payload.idempotencyKey, skillId)
@@ -438,7 +513,8 @@ try {
               await recordTask(page, payload.idempotencyKey, skillId, page.url())
               continue
             }
-            await openNewTask(page)
+            // 从项目内新建会话，豆包会自动将 Skill 任务归入该项目，无需依赖拖拽或后置移动。
+            await openProjectTask(page, PROJECT_NAME)
             // 每个任务只发送已挂载的企业 Skill，不再向豆包任务正文注入额外提示词。
             // Enter 仍需保留，用于触发豆包创建任务会话并生成可持久化的任务 URL。
             const taskUrl = await submitTask(page, skillId)
@@ -446,14 +522,11 @@ try {
             recordedTasks.set(skillId, taskUrl)
             await recordTask(page, payload.idempotencyKey, skillId, taskUrl)
           }
-          for (const taskUrl of [...new Set(taskUrls)]) {
-            await pinTask(page, taskUrl)
-          }
           const finalTaskUrl = page.url()
           workerResult = {
             success: true,
             requiresUserAction: false,
-            message: `已创建并置顶 ${taskUrls.length} 个豆包工作任务，每个任务分别初始化 1 个企业 Skill：${skills.join('、')}`,
+            message: `已${projectResult.created ? '创建' : '复用'}豆包项目“${PROJECT_NAME}”，并在项目内创建 ${taskUrls.length} 个工作任务；每个任务分别初始化 1 个企业 Skill：${skills.join('、')}`,
             initializedSkillIds: skills,
             taskUrl: finalTaskUrl,
           }
