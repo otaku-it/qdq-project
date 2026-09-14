@@ -14,15 +14,16 @@ management:
 launcher:
   step-delay-ms: 850
   skill-upload:
-    # mock 仅演示编排；playwright 会真实上传到豆包企业后台。
-    mode: ${LAUNCHER_SKILL_UPLOAD_MODE:mock}
+    # 默认使用 Playwright 真实上传；需要本地编排测试时显式设置为 mock。
+    mode: ${LAUNCHER_SKILL_UPLOAD_MODE:playwright}
     node-command: ${LAUNCHER_NODE_COMMAND:node}
     worker-script: ${LAUNCHER_SKILL_WORKER:automation/upload-agent-skills.mjs}
     package-directory: ${LAUNCHER_SKILL_PACKAGE_DIR:skills}
     timeout-seconds: ${LAUNCHER_SKILL_UPLOAD_TIMEOUT_SECONDS:120}
   agent-initialization:
     # 与管理员上传独立配置，避免开启用户侧自动化时改变原有上传行为。
-    mode: ${LAUNCHER_AGENT_INITIALIZATION_MODE:mock}
+    # 默认使用 Playwright 真实初始化；需要本地编排测试时显式设置为 mock。
+    mode: ${LAUNCHER_AGENT_INITIALIZATION_MODE:playwright}
     node-command: ${LAUNCHER_NODE_COMMAND:node}
     worker-script: ${LAUNCHER_AGENT_INITIALIZATION_WORKER:automation/initialize-doubao-agent.mjs}
     timeout-seconds: ${LAUNCHER_AGENT_INITIALIZATION_TIMEOUT_SECONDS:120}

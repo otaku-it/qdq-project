@@ -1,9 +1,8 @@
-import { chromium } from 'playwright-core'
 import { resolve } from 'node:path'
+import { NAVIGATION_TIMEOUT_MS, openDoubaoBrowser } from './doubao-browser.mjs'
 
 const WORK_URL = process.env.DOUBAO_WORK_URL || 'https://www.doubao.com/chat/skills?channel=RYQ5f'
 const WORK_ORIGIN = new URL(WORK_URL).origin
-const CDP_ENDPOINT = process.env.DOUBAO_CDP_ENDPOINT
 const USER_DATA_DIR = process.env.DOUBAO_USER_DATA_DIR || resolve(process.cwd(), '.doubao-profile')
 
 async function readPayload() {
@@ -12,47 +11,8 @@ async function readPayload() {
   return JSON.parse(Buffer.concat(chunks).toString('utf8'))
 }
 
-async function ensureCdpTarget(endpoint) {
-  const endpointUrl = new URL(endpoint)
-  if (!['http:', 'https:'].includes(endpointUrl.protocol)) return
-  const origin = endpointUrl.origin
-  const response = await fetch(`${origin}/json/list`, { signal: AbortSignal.timeout(3_000) })
-  if (!response.ok) throw new Error(`CDP 状态检查失败 (${response.status})`)
-  const targets = await response.json()
-  if (Array.isArray(targets) && targets.some((target) => target.type === 'page')) return
-
-  const createResponse = await fetch(`${origin}/json/new?${encodeURIComponent(WORK_URL)}`, {
-    method: 'PUT',
-    signal: AbortSignal.timeout(5_000),
-  })
-  if (!createResponse.ok) throw new Error(`CDP 无可用页面且自动新建页面失败 (${createResponse.status})`)
-}
-
 async function openBrowser() {
-  let cdpFailure
-  if (CDP_ENDPOINT) {
-    try {
-      await ensureCdpTarget(CDP_ENDPOINT)
-      const browser = await chromium.connectOverCDP(CDP_ENDPOINT)
-      const context = browser.contexts()[0]
-      if (!context) throw new Error('CDP 浏览器没有可用上下文')
-      return { context, ownsContext: false }
-    } catch (error) {
-      cdpFailure = error
-    }
-  }
-
-  try {
-    const context = await chromium.launchPersistentContext(USER_DATA_DIR, {
-      channel: 'chrome',
-      headless: false,
-    })
-    return { context, ownsContext: true }
-  } catch (error) {
-    const cdpMessage = cdpFailure instanceof Error ? `CDP 连接失败：${cdpFailure.message}；` : ''
-    const launchMessage = error instanceof Error ? error.message : String(error)
-    throw new Error(`${cdpMessage}浏览器自动启动失败：${launchMessage}`)
-  }
+  return openDoubaoBrowser({ targetUrl: WORK_URL, userDataDir: USER_DATA_DIR })
 }
 
 function isDoubaoWorkPage(page) {
@@ -218,7 +178,7 @@ async function findExistingTaskInSidebar(page, marker, skillId) {
     // 不要在主工作页上跳转历史会话：豆包的 SPA 会重置当前任务草稿和已发送记录，
     // 从而导致后续第二个 Skill 看似执行成功但最终只保留一个发送窗口。
     const candidatePage = await page.context().newPage()
-    await candidatePage.goto(taskUrl, { waitUntil: 'domcontentloaded' }).catch(() => {})
+    await candidatePage.goto(taskUrl, { waitUntil: 'domcontentloaded', timeout: NAVIGATION_TIMEOUT_MS }).catch(() => {})
     const markerElement = marker
       ? candidatePage.getByText(marker, { exact: false }).last()
       : null
@@ -248,7 +208,7 @@ async function openWorkPage(context) {
     }) ?? await context.newPage()
   }
   if (!page.url().startsWith(`${WORK_ORIGIN}/chat`)) {
-    await page.goto(WORK_URL, { waitUntil: 'domcontentloaded' })
+    await page.goto(WORK_URL, { waitUntil: 'domcontentloaded', timeout: NAVIGATION_TIMEOUT_MS })
   }
   await page.bringToFront()
   await page.waitForTimeout(1_000)
@@ -526,6 +486,7 @@ try {
   workerExitCode = browserUnavailable ? 0 : 1
 } finally {
   if (browserHandle?.ownsContext) await browserHandle.context.close().catch(() => {})
+  await browserHandle?.releaseLock?.().catch(() => {})
 }
 
 await new Promise((resolve, reject) => {

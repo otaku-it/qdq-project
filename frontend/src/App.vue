@@ -152,7 +152,7 @@ function readSession(): LoginSession | null {
       </nav>
     </aside>
     <main class="main-area">
-      <header class="topbar"><div class="breadcrumb"><span>智灵中台</span><span>/</span><strong>启动器</strong></div><div class="topbar-actions"><div class="environment-state"><span class="live-dot"></span>Demo 环境<span class="divider"></span><CloudCog :size="17" />API 已连接</div><span class="topbar-account"><UserRound :size="15" /><span><strong>{{ session.operatorName }}</strong><small>{{ session.role === 'ADMIN' ? '企业管理员' : '普通用户' }}</small></span></span><button class="topbar-logout" type="button" title="退出登录" aria-label="退出登录" @click="logout"><LogOut :size="17" /></button></div></header>
+      <header class="topbar"><div class="breadcrumb"><span>智灵中台</span><span>/</span><strong>启动器</strong></div><div class="topbar-actions"><div class="environment-state"><span class="live-dot"></span>真实环境<span class="divider"></span><CloudCog :size="17" />API 已连接</div><span class="topbar-account"><UserRound :size="15" /><span><strong>{{ session.operatorName }}</strong><small>{{ session.role === 'ADMIN' ? '企业管理员' : '普通用户' }}</small></span></span><button class="topbar-logout" type="button" title="退出登录" aria-label="退出登录" @click="logout"><LogOut :size="17" /></button></div></header>
       <div v-if="error" class="global-error" role="alert"><CircleHelp :size="18" /><span>{{ error }}</span><button type="button" aria-label="关闭" @click="error = ''">×</button></div>
       <div v-if="loading" class="loading-state"><Bot :size="32" /><span>正在加载启动器任务目录</span></div>
       <JobWorkspace v-else-if="job" :job="job" :busy="busy" @continue="continueJob" @retry="retryJob" @reset="reset" />

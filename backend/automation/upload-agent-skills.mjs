@@ -1,8 +1,7 @@
-import { chromium } from 'playwright-core'
 import { resolve } from 'node:path'
+import { NAVIGATION_TIMEOUT_MS, openDoubaoBrowser } from './doubao-browser.mjs'
 
 const ADMIN_URL = process.env.DOUBAO_ADMIN_URL || 'https://admin.doubao.com/ask/doubao/builtin-skill'
-const CDP_ENDPOINT = process.env.DOUBAO_CDP_ENDPOINT
 const USER_DATA_DIR = process.env.DOUBAO_USER_DATA_DIR || resolve(process.cwd(), '.doubao-profile')
 const AUTHORIZATION_WAIT_MS = Number(process.env.DOUBAO_AUTHORIZATION_WAIT_MS || 45_000)
 
@@ -12,48 +11,8 @@ async function readPayload() {
   return JSON.parse(Buffer.concat(chunks).toString('utf8'))
 }
 
-async function ensureCdpTarget(endpoint) {
-  const endpointUrl = new URL(endpoint)
-  if (!['http:', 'https:'].includes(endpointUrl.protocol)) return
-  const origin = endpointUrl.origin
-  const response = await fetch(`${origin}/json/list`, { signal: AbortSignal.timeout(3_000) })
-  if (!response.ok) throw new Error(`CDP 状态检查失败 (${response.status})`)
-  const targets = await response.json()
-  if (Array.isArray(targets) && targets.some((target) => target.type === 'page')) return
-
-  const createResponse = await fetch(`${origin}/json/new?${encodeURIComponent(ADMIN_URL)}`, {
-    method: 'PUT',
-    signal: AbortSignal.timeout(5_000),
-  })
-  if (!createResponse.ok) throw new Error(`CDP 无可用页面且自动新建页面失败 (${createResponse.status})`)
-}
-
 async function openBrowser() {
-  let cdpFailure
-  if (CDP_ENDPOINT) {
-    try {
-      // Chrome 窗口全部关闭时进程和 9222 仍可能存活，但没有 page target；先自动恢复一个页面。
-      await ensureCdpTarget(CDP_ENDPOINT)
-      const browser = await chromium.connectOverCDP(CDP_ENDPOINT)
-      const context = browser.contexts()[0]
-      if (!context) throw new Error('CDP 浏览器没有可用上下文')
-      // CDP 模式连接的是用户正在使用的 Chrome。Worker 退出即可断开连接，禁止关闭浏览器。
-      return { browser: null, context, ownsContext: false }
-    } catch (error) {
-      cdpFailure = error
-    }
-  }
-  try {
-    const context = await chromium.launchPersistentContext(USER_DATA_DIR, {
-      channel: 'chrome',
-      headless: false,
-    })
-    return { browser: null, context, ownsContext: true }
-  } catch (error) {
-    const cdpMessage = cdpFailure instanceof Error ? `CDP 连接失败：${cdpFailure.message}；` : ''
-    const launchMessage = error instanceof Error ? error.message : String(error)
-    throw new Error(`${cdpMessage}浏览器自动启动失败：${launchMessage}`)
-  }
+  return openDoubaoBrowser({ targetUrl: ADMIN_URL, userDataDir: USER_DATA_DIR })
 }
 
 function isFeishuAuthorizationUrl(value) {
@@ -123,6 +82,8 @@ async function hasListFrame(page) {
 
 async function waitForAdminOrAuthorization(context, page, timeoutMs = AUTHORIZATION_WAIT_MS) {
   const deadline = Date.now() + timeoutMs
+  const reloadDeadline = Date.now() + 8_000
+  let reloaded = false
   let duplicatesClosed = 0
   while (Date.now() < deadline) {
     const authorization = await normalizeAuthorizationPages(context)
@@ -132,6 +93,11 @@ async function waitForAdminOrAuthorization(context, page, timeoutMs = AUTHORIZAT
     }
     if (!page.isClosed() && await hasListFrame(page)) {
       return { type: 'ready', page, duplicatesClosed }
+    }
+    // 豆包后台外层偶发停留在 loading。只刷新当前页一次，既不新开标签页也不重复授权。
+    if (!reloaded && Date.now() >= reloadDeadline && !page.isClosed()) {
+      reloaded = true
+      await page.reload({ waitUntil: 'domcontentloaded', timeout: NAVIGATION_TIMEOUT_MS }).catch(() => {})
     }
     await new Promise((resolve) => setTimeout(resolve, 250))
   }
@@ -305,8 +271,10 @@ try {
   } else {
     let page = await findAdminPage(browserHandle.context)
     if (!page) {
-      page = await browserHandle.context.newPage()
-      await page.goto(ADMIN_URL, { waitUntil: 'domcontentloaded' })
+      // 独立 Chrome 首次启动可能自带 about:blank，复用该标签避免多开一个空白页。
+      page = browserHandle.context.pages().find((candidate) => candidate.url() === 'about:blank')
+        ?? await browserHandle.context.newPage()
+      await page.goto(ADMIN_URL, { waitUntil: 'domcontentloaded', timeout: NAVIGATION_TIMEOUT_MS })
     }
     const state = await waitForAdminOrAuthorization(browserHandle.context, page)
     if (state.type === 'authorization') {
@@ -345,7 +313,10 @@ try {
   }
   workerExitCode = browserUnavailable ? 0 : 1
 } finally {
-  if (browserHandle?.ownsContext) await browserHandle.context.close().catch(() => {})
+  if (browserHandle?.ownsContext && !(browserHandle.preserveOnUserAction && workerResult?.requiresUserAction)) {
+    await browserHandle.context.close().catch(() => {})
+  }
+  await browserHandle?.releaseLock?.().catch(() => {})
 }
 
 // CDP 连接会保持 Node 事件循环存活。先完整写出 JSON，再显式退出，只断开 Worker，不关闭用户 Chrome。
