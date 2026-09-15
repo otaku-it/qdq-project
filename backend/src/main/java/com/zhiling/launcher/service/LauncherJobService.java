@@ -67,37 +67,58 @@ public class LauncherJobService {
 
     /** 仅用于 Demo 的任务仓库；单个任务仍由 synchronized(job) 保护。 */
     private final Map<String, MutableJob> jobs = new ConcurrentHashMap<>();
-    /** 管理员上传成功后，普通用户初始化前需要查询的租户级 Skills 目录。 */
+    /** 管理员上传成功后的测试回退状态；生产运行时以数据库租户状态为准。 */
     private final Map<String, Set<String>> tenantSkills = new ConcurrentHashMap<>();
     private final ScheduledExecutorService executor = Executors.newScheduledThreadPool(2);
     private final long stepDelayMs;
     private final AgentSkillUploadAdapter skillUploadAdapter;
     private final DoubaoAgentInitializationAdapter agentInitializationAdapter;
+    private final AgentSkillService agentSkillService;
 
     @Autowired
     public LauncherJobService(
             @Value("${launcher.step-delay-ms:850}") long stepDelayMs,
             AgentSkillUploadAdapter skillUploadAdapter,
-            DoubaoAgentInitializationAdapter agentInitializationAdapter
+            DoubaoAgentInitializationAdapter agentInitializationAdapter,
+            AgentSkillService agentSkillService
     ) {
         this.stepDelayMs = stepDelayMs;
         this.skillUploadAdapter = skillUploadAdapter;
         this.agentInitializationAdapter = agentInitializationAdapter;
+        this.agentSkillService = agentSkillService;
     }
 
     /** 测试和纯 Java Demo 使用的便捷构造器，执行结果会明确标记为 SIMULATED。 */
     LauncherJobService(long stepDelayMs) {
-        this(stepDelayMs, new SimulatedAgentSkillUploadAdapter(), new SimulatedDoubaoAgentInitializationAdapter());
+        this(stepDelayMs, new SimulatedAgentSkillUploadAdapter(), new SimulatedDoubaoAgentInitializationAdapter(), null);
     }
 
     /** 保留原有上传适配器测试入口，普通用户初始化仍使用模拟实现。 */
     LauncherJobService(long stepDelayMs, AgentSkillUploadAdapter skillUploadAdapter) {
-        this(stepDelayMs, skillUploadAdapter, new SimulatedDoubaoAgentInitializationAdapter());
+        this(stepDelayMs, skillUploadAdapter, new SimulatedDoubaoAgentInitializationAdapter(), null);
+    }
+
+    LauncherJobService(long stepDelayMs, AgentSkillUploadAdapter skillUploadAdapter,
+                       DoubaoAgentInitializationAdapter initializationAdapter) {
+        this(stepDelayMs, skillUploadAdapter, initializationAdapter, null);
     }
 
     /** 返回页面可勾选的任务和 Skills，不返回任何飞书凭据。 */
     public BlueprintView getBlueprint() {
-        return new BlueprintView("2026.09-launcher", TASKS, SKILLS);
+        List<SkillView> skills = SKILLS;
+        if (agentSkillService != null) {
+            try {
+                List<SkillView> databaseSkills = agentSkillService.listPublic().stream()
+                        .map(skill -> new SkillView(skill.getSkillCode(), skill.getDisplayName(),
+                                skill.getDescription() == null ? "" : skill.getDescription(),
+                                skill.getCategory() == null ? "通用" : skill.getCategory()))
+                        .toList();
+                if (!databaseSkills.isEmpty()) skills = databaseSkills;
+            } catch (RuntimeException ignored) {
+                // 数据库暂不可用时保留历史内存目录，保证原有启动器仍可打开。
+            }
+        }
+        return new BlueprintView("2026.09-launcher", TASKS, skills);
     }
 
     /**
@@ -281,6 +302,13 @@ public class LauncherJobService {
                 // 只有适配器确认上传成功后，普通用户才能从同一租户目录初始化这些 Skills。
                 tenantSkills.computeIfAbsent(tenantKey(job.tenantName), ignored -> ConcurrentHashMap.newKeySet())
                         .addAll(result.uploadedSkillIds());
+                if (agentSkillService != null) {
+                    try {
+                        agentSkillService.markUploaded(job.tenantName, result.uploadedSkillIds(), null);
+                    } catch (RuntimeException ignored) {
+                        // 数据库状态写入失败不覆盖已完成的真实浏览器上传结果，后续可由管理员重试同步。
+                    }
+                }
                 String eventLevel = "SIMULATED".equals(result.mode()) ? "warning" : "success";
                 job.events.add(new EventView(now, eventLevel, result.message()));
                 completeStep(job, uploadStep, now);
@@ -416,7 +444,16 @@ public class LauncherJobService {
             if (request.selectedSkills().isEmpty()) {
                 throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "已选择 Agent Skills 任务时至少需要勾选一个 Skill");
             }
-            if (!SKILLS.stream().map(SkillView::id).collect(java.util.stream.Collectors.toSet()).containsAll(request.selectedSkills())) {
+            Set<String> supportedSkills = SKILLS.stream().map(SkillView::id).collect(java.util.stream.Collectors.toSet());
+            if (agentSkillService != null) {
+                try {
+                    List<SkillView> dbSkills = agentSkillService.getBlueprintSkills();
+                    if (!dbSkills.isEmpty()) supportedSkills = dbSkills.stream().map(SkillView::id).collect(java.util.stream.Collectors.toSet());
+                } catch (RuntimeException ignored) {
+                    // 数据库不可用时保留原有内存目录，避免影响既有任务编排测试。
+                }
+            }
+            if (!supportedSkills.containsAll(request.selectedSkills())) {
                 throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "存在不支持的 Agent Skill");
             }
         }
@@ -434,6 +471,13 @@ public class LauncherJobService {
     }
 
     private boolean areSkillsPreloaded(MutableJob job) {
+        if (agentSkillService != null) {
+            try {
+                if (agentSkillService.arePreloaded(job.tenantName, job.selectedSkills)) return true;
+            } catch (RuntimeException ignored) {
+                // 回退到内存状态，兼容数据库尚未初始化的本地开发环境。
+            }
+        }
         return tenantSkills.getOrDefault(tenantKey(job.tenantName), Set.of()).containsAll(job.selectedSkills);
     }
 
@@ -442,8 +486,18 @@ public class LauncherJobService {
     }
 
     private List<String> skillNames(List<String> ids) {
+        List<SkillView> catalog = SKILLS;
+        if (agentSkillService != null) {
+            try {
+                List<SkillView> dbSkills = agentSkillService.getBlueprintSkills();
+                if (!dbSkills.isEmpty()) catalog = dbSkills;
+            } catch (RuntimeException ignored) {
+                // 使用内存目录作为安全回退。
+            }
+        }
+        List<SkillView> finalCatalog = catalog;
         return ids.stream()
-                .map(id -> SKILLS.stream().filter(skill -> skill.id().equals(id)).findFirst().map(SkillView::name).orElse(id))
+                .map(id -> finalCatalog.stream().filter(skill -> skill.id().equals(id)).findFirst().map(SkillView::name).orElse(id))
                 .toList();
     }
 
@@ -491,13 +545,27 @@ public class LauncherJobService {
     }
 
     private String deliveryStatus(MutableJob job, String stepId) {
-        return job.steps.stream().filter(step -> step.id.equals(stepId)).findFirst().map(step -> switch (step.status) {
-            case SUCCEEDED -> "READY";
-            case FAILED -> "FAILED";
-            case WAITING_USER -> "WAITING_AUTHORIZATION";
-            case RUNNING -> "PROVISIONING";
-            case PENDING -> "PENDING";
-        }).orElse("PENDING");
+        // 使用显式条件判断，避免编译器为枚举 switch 生成额外的 LauncherJobService$1 类。
+        // 这样在开发环境增量编译或热重启过程中，即使旧的内部类文件被清理，也不会导致任务创建返回 500。
+        for (MutableStep step : job.steps) {
+            if (!step.id.equals(stepId)) {
+                continue;
+            }
+            if (step.status == StepStatus.SUCCEEDED) {
+                return "READY";
+            }
+            if (step.status == StepStatus.FAILED) {
+                return "FAILED";
+            }
+            if (step.status == StepStatus.WAITING_USER) {
+                return "WAITING_AUTHORIZATION";
+            }
+            if (step.status == StepStatus.RUNNING) {
+                return "PROVISIONING";
+            }
+            return "PENDING";
+        }
+        return "PENDING";
     }
 
     private void updateProgress(MutableJob job) {

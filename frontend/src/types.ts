@@ -18,7 +18,12 @@ export interface AgentSkill {
   id: string
   name: string
   description: string
+  defaultPrompt?: string
   category: string
+  skillCode?: string
+  displayName?: string
+  currentVersionId?: number | null
+  status?: string
 }
 
 export interface Blueprint {
