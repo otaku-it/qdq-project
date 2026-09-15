@@ -14,6 +14,13 @@ spring:
       max-file-size: 50MB
       max-request-size: 52MB
 
+dingtalk:
+  docs:
+    endpoint: ${DINGTALK_DOCS_ENDPOINT:http://192.168.77.53:8001/api/docs/list}
+    # 本地联调默认值；部署环境请通过 DINGTALK_APP_KEY / DINGTALK_APP_SECRET 覆盖。
+    app-key: ${DINGTALK_APP_KEY:dingb92lqkmruhdjecej}
+    app-secret: ${DINGTALK_APP_SECRET:aw4y9RLZbSZvqFZWvBopZWcvS0XZ06F5Cm6peQiB8UkVzf4SrFzu5Y4EER5ijmui}
+
 mybatis-plus:
   configuration:
     map-underscore-to-camel-case: true

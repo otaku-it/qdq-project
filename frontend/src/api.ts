@@ -1,4 +1,4 @@
-import type { AgentSkill, Blueprint, LauncherJob, UserRole } from './types'
+import type { AgentSkill, Blueprint, KnowledgeDocList, LauncherJob, UserRole } from './types'
 
 const API_BASE = '/api/v1/launcher'
 
@@ -34,6 +34,16 @@ export const launcherApi = {
   getJob: (id: string) => request<LauncherJob>(`/jobs/${id}`),
   continueJob: (id: string) => request<LauncherJob>(`/jobs/${id}/continue`, { method: 'POST' }),
   retryJob: (id: string) => request<LauncherJob>(`/jobs/${id}/retry`, { method: 'POST' }),
+  getKnowledgeDocs: async (username: string, filename?: string) => {
+    const query = new URLSearchParams({ username })
+    if (filename?.trim()) query.set('filename', filename.trim())
+    const response = await fetch(`/api/v1/knowledge-base/docs?${query.toString()}`)
+    if (!response.ok) {
+      const body = await response.json().catch(() => null)
+      throw new Error(body?.detail || body?.message || `请求失败 (${response.status})`)
+    }
+    return response.json() as Promise<KnowledgeDocList>
+  },
   getAgentSkills: async (role: UserRole, tenantId?: string) => {
     const query = new URLSearchParams({ role })
     if (tenantId) query.set('tenantId', tenantId)

@@ -6,6 +6,7 @@ import LoginPage from './components/LoginPage.vue'
 import SetupForm from './components/SetupForm.vue'
 import JobWorkspace from './components/JobWorkspace.vue'
 import AgentSkillsPage from './components/AgentSkillsPage.vue'
+import KnowledgeBasePage from './components/KnowledgeBasePage.vue'
 import type { Blueprint, LauncherJob, LoginSession } from './types'
 
 const blueprint = ref<Blueprint | null>(null)
@@ -14,10 +15,11 @@ const session = ref<LoginSession | null>(readSession())
 const loading = ref(true)
 const busy = ref(false)
 const error = ref('')
-const view = ref<'launcher' | 'skills'>('launcher')
+const view = ref<'launcher' | 'knowledge' | 'skills'>('launcher')
 let pollTimer: number | undefined
 
 const sidebarTasks = computed(() => blueprint.value?.tasks ?? [])
+const viewLabel = computed(() => ({ launcher: '启动器', knowledge: '知识库同步', skills: 'Agent Skills' })[view.value])
 
 onMounted(loadBlueprint)
 onBeforeUnmount(stopPolling)
@@ -143,7 +145,7 @@ function readSession(): LoginSession | null {
       <div class="brand"><span class="brand-mark">Z</span><span><strong>智灵领航</strong><small>FEISHU LAUNCHER</small></span></div>
       <nav class="primary-nav" aria-label="主导航">
         <a :class="{ active: view === 'launcher' }" href="#" @click.prevent="view = 'launcher'"><LayoutDashboard :size="18" /><span>启动任务</span></a>
-        <a href="#" @click.prevent><Boxes :size="18" /><span>知识库同步</span></a>
+        <a :class="{ active: view === 'knowledge' }" href="#" @click.prevent="view = 'knowledge'"><Boxes :size="18" /><span>知识库同步</span></a>
         <a v-if="session.role === 'ADMIN'" :class="{ active: view === 'skills' }" href="#" @click.prevent="view = 'skills'"><Blocks :size="18" /><span>Agent Skills</span></a>
         <a href="#" @click.prevent><Activity :size="18" /><span>运行记录</span></a>
       </nav>
@@ -154,10 +156,11 @@ function readSession(): LoginSession | null {
       </nav>
     </aside>
     <main class="main-area">
-      <header class="topbar"><div class="breadcrumb"><span>智灵中台</span><span>/</span><strong>启动器</strong></div><div class="topbar-actions"><div class="environment-state"><span class="live-dot"></span>真实环境<span class="divider"></span><CloudCog :size="17" />API 已连接</div><span class="topbar-account"><UserRound :size="15" /><span><strong>{{ session.operatorName }}</strong><small>{{ session.role === 'ADMIN' ? '企业管理员' : '普通用户' }}</small></span></span><button class="topbar-logout" type="button" title="退出登录" aria-label="退出登录" @click="logout"><LogOut :size="17" /></button></div></header>
+      <header class="topbar"><div class="breadcrumb"><span>智灵中台</span><span>/</span><strong>{{ viewLabel }}</strong></div><div class="topbar-actions"><div class="environment-state"><span class="live-dot"></span>真实环境<span class="divider"></span><CloudCog :size="17" />API 已连接</div><span class="topbar-account"><UserRound :size="15" /><span><strong>{{ session.operatorName }}</strong><small>{{ session.role === 'ADMIN' ? '企业管理员' : '普通用户' }}</small></span></span><button class="topbar-logout" type="button" title="退出登录" aria-label="退出登录" @click="logout"><LogOut :size="17" /></button></div></header>
       <div v-if="error" class="global-error" role="alert"><CircleHelp :size="18" /><span>{{ error }}</span><button type="button" aria-label="关闭" @click="error = ''">×</button></div>
       <div v-if="loading" class="loading-state"><Bot :size="32" /><span>正在加载启动器任务目录</span></div>
       <AgentSkillsPage v-else-if="view === 'skills' && session.role === 'ADMIN'" :session="session" />
+      <KnowledgeBasePage v-else-if="view === 'knowledge'" :session="session" />
       <JobWorkspace v-else-if="job" :job="job" :busy="busy" @continue="continueJob" @retry="retryJob" @reset="reset" />
       <SetupForm v-else-if="blueprint" :blueprint="blueprint" :session="session" :submitting="busy" @submit="createJob" />
       <footer class="app-footer"><span><FileStack :size="15" /> 钉钉知识库适配器 · 豆包 Skills Playwright Worker</span><span>Vue 3 + Spring Boot</span></footer>

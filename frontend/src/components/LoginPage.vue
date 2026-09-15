@@ -13,8 +13,8 @@ const accounts: Record<UserRole, { operatorName: string; larkUser: string; label
     detail: '管理企业知识库同步与租户 Skills 预置',
   },
   USER: {
-    operatorName: '小王',
-    larkUser: '小王',
+    operatorName: '云青',
+    larkUser: '云青',
     label: '普通用户',
     detail: '同步个人知识库并初始化豆包 Agent',
   },
