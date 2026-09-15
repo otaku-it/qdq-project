@@ -101,6 +101,7 @@ public class PlaywrightDoubaoAgentInitializationAdapter implements DoubaoAgentIn
             payload.put("larkUser", request.larkUser());
             payload.put("idempotencyKey", request.idempotencyKey());
             payload.put("skills", request.skillIds());
+            payload.put("defaultPrompts", request.defaultPrompts());
 
             Process process = new ProcessBuilder(nodeCommand, workerScript.toString())
                     .redirectErrorStream(false)

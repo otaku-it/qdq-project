@@ -1,6 +1,7 @@
 package com.zhiling.launcher.adapter;
 
 import java.util.List;
+import java.util.Map;
 
 /**
  * 在普通用户的豆包工作台中创建任务并挂载企业 Skills 的外部适配器。
@@ -13,7 +14,7 @@ public interface DoubaoAgentInitializationAdapter {
     /**
      * 为当前用户创建一条豆包工作任务并发送初始化消息。
      *
-     * @param request 租户、用户、任务幂等键和需要挂载的 Skill ID
+     * @param request 租户、用户、任务幂等键、需要挂载的 Skill ID 及其默认提示词
      * @return 初始化结果；需要重新登录时通过 requiresUserAction 暂停任务树
      */
     InitializationResult initialize(InitializationRequest request);
@@ -24,10 +25,12 @@ public interface DoubaoAgentInitializationAdapter {
             String operatorName,
             String larkUser,
             String idempotencyKey,
-            List<String> skillIds
+            List<String> skillIds,
+            Map<String, String> defaultPrompts
     ) {
         public InitializationRequest {
             skillIds = List.copyOf(skillIds);
+            defaultPrompts = defaultPrompts == null ? Map.of() : Map.copyOf(defaultPrompts);
         }
     }
 

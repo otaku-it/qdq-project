@@ -195,6 +195,10 @@ child.stdin.end(JSON.stringify({
   larkUser: '普通用户',
   idempotencyKey: 'fixture-job-1',
   skills: ['project-plan', 'requirement-analysis'],
+  defaultPrompts: {
+    'project-plan': '请按项目目标生成里程碑计划。',
+    'requirement-analysis': '请梳理需求范围、验收标准和待确认项。',
+  },
 }))
 
 let stdout = ''
@@ -214,8 +218,8 @@ if (taskRecords.length !== 2) throw new Error(stdout)
 if (taskRecords.some((record) => record.pinned === true)) throw new Error(stdout)
 if (taskRecords[0].attachedSkills.join(',') !== 'project-plan') throw new Error(stdout)
 if (taskRecords[1].attachedSkills.join(',') !== 'requirement-analysis') throw new Error(stdout)
-if (taskRecords[0].prompt !== '') throw new Error(stdout)
-if (taskRecords[1].prompt !== '') throw new Error(stdout)
+if (taskRecords[0].prompt !== '请按项目目标生成里程碑计划。') throw new Error(stdout)
+if (taskRecords[1].prompt !== '请梳理需求范围、验收标准和待确认项。') throw new Error(stdout)
 if (!taskRecords.every((record) => record.projectId === 'fixture-project-1')) throw new Error(stdout)
 if (!output.initializedSkillIds.includes('project-plan')) throw new Error(stdout)
 if (!output.initializedSkillIds.includes('requirement-analysis')) throw new Error(stdout)
@@ -253,6 +257,7 @@ if (resumeRecords.length !== 2) throw new Error(resumeStdout)
 if (resumeRecords.some((record) => record.pinned === true)) throw new Error(resumeStdout)
 if (resumeRecords.filter((record) => record.attachedSkills.includes('project-plan')).length !== 1) throw new Error(resumeStdout)
 if (resumeRecords.filter((record) => record.attachedSkills.includes('requirement-analysis')).length !== 1) throw new Error(resumeStdout)
+if (resumeRecords.find((record) => record.attachedSkills.includes('requirement-analysis'))?.prompt !== '') throw new Error(resumeStdout)
 if (!resumeRecords.every((record) => record.projectId === 'fixture-project-1')) throw new Error(resumeStdout)
 process.stdout.write('Playwright partial-failure retry verification passed\n')
 

@@ -321,7 +321,8 @@ public class LauncherJobService {
                     job.operatorName,
                     job.larkUser,
                     job.id,
-                    job.selectedSkills
+                    job.selectedSkills,
+                    defaultPromptsFor(job.selectedSkills)
             ));
             synchronized (job) {
                 if (job.status != JobStatus.RUNNING || initializationStep.status != StepStatus.RUNNING) {
@@ -499,6 +500,18 @@ public class LauncherJobService {
         return ids.stream()
                 .map(id -> finalCatalog.stream().filter(skill -> skill.id().equals(id)).findFirst().map(SkillView::name).orElse(id))
                 .toList();
+    }
+
+    /** 数据库不可用或 Skill 未配置提示词时使用空映射，保留既有只发送 Skill 的初始化行为。 */
+    private Map<String, String> defaultPromptsFor(List<String> skillIds) {
+        if (agentSkillService == null) {
+            return Map.of();
+        }
+        try {
+            return agentSkillService.getDefaultPrompts(skillIds);
+        } catch (RuntimeException ignored) {
+            return Map.of();
+        }
     }
 
     private String failureStepId(MutableJob job) {

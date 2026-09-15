@@ -409,7 +409,7 @@ async function clearComposerBody(composer) {
   })
 }
 
-async function submitTask(page, skillId) {
+async function submitTask(page, skillId, defaultPrompt = '') {
   await selectEnterpriseSkill(page, skillId)
 
   const composer = await findComposer(page)
@@ -421,6 +421,10 @@ async function submitTask(page, skillId) {
   await composer.click()
   await clearComposerBody(composer)
   await composer.press('End')
+  if (defaultPrompt) {
+    // Skill 标签保留在输入框中；默认提示词仅发送到它自己的新任务，不会串到其他 Skill 会话。
+    await composer.pressSequentially(defaultPrompt)
+  }
   const previousUrl = page.url()
   await composer.press('Enter')
 
@@ -448,6 +452,14 @@ try {
   }
   if (typeof payload.idempotencyKey !== 'string' || payload.idempotencyKey.length === 0) {
     throw new Error('缺少初始化任务幂等键')
+  }
+  const defaultPrompts = {}
+  if (payload.defaultPrompts && typeof payload.defaultPrompts === 'object' && !Array.isArray(payload.defaultPrompts)) {
+    for (const [skillId, prompt] of Object.entries(payload.defaultPrompts)) {
+      if (!skills.includes(skillId) || typeof prompt !== 'string') continue
+      const normalizedPrompt = prompt.trim()
+      if (normalizedPrompt) defaultPrompts[skillId] = normalizedPrompt
+    }
   }
 
   const legacyMarker = `[智灵启动器任务 ${payload.idempotencyKey}]`
@@ -515,9 +527,9 @@ try {
             }
             // 从项目内新建会话，豆包会自动将 Skill 任务归入该项目，无需依赖拖拽或后置移动。
             await openProjectTask(page, PROJECT_NAME)
-            // 每个任务只发送已挂载的企业 Skill，不再向豆包任务正文注入额外提示词。
-            // Enter 仍需保留，用于触发豆包创建任务会话并生成可持久化的任务 URL。
-            const taskUrl = await submitTask(page, skillId)
+            // 每个任务只挂载一个企业 Skill，并仅发送其管理员配置的默认提示词。
+            // 未配置提示词时保留原有空正文发送逻辑。
+            const taskUrl = await submitTask(page, skillId, defaultPrompts[skillId])
             taskUrls.push(taskUrl)
             recordedTasks.set(skillId, taskUrl)
             await recordTask(page, payload.idempotencyKey, skillId, taskUrl)

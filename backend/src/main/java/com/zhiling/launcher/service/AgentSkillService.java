@@ -21,8 +21,10 @@ import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.time.LocalDateTime;
 import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
@@ -77,6 +79,22 @@ public class AgentSkillService {
                 skill.getSkillCode(), skill.getDisplayName(),
                 skill.getDescription() == null ? "" : skill.getDescription(),
                 skill.getCategory() == null ? "通用" : skill.getCategory())).toList();
+    }
+
+    /** 返回所选启用 Skill 的非空默认提示词，供普通用户初始化豆包 Agent 时逐项发送。 */
+    public Map<String, String> getDefaultPrompts(List<String> skillCodes) {
+        if (skillCodes == null || skillCodes.isEmpty()) {
+            return Map.of();
+        }
+        Set<String> selected = Set.copyOf(skillCodes);
+        Map<String, String> prompts = new LinkedHashMap<>();
+        for (AgentSkill skill : listPublic()) {
+            String prompt = skill.getDefaultPrompt();
+            if (selected.contains(skill.getSkillCode()) && prompt != null && !prompt.isBlank()) {
+                prompts.put(skill.getSkillCode(), prompt);
+            }
+        }
+        return prompts;
     }
 
     /** 普通用户只可看到当前租户已成功预置的公共 Skill。 */
