@@ -267,6 +267,7 @@ const sidebarResumeChild = spawn(process.execPath, [new URL('./initialize-doubao
     ...process.env,
     DOUBAO_WORK_URL: `http://127.0.0.1:${port}/chat/fixture-existing?resume=1&root=1`,
     DOUBAO_USER_DATA_DIR: join(sidebarResumeDirectory, 'profile'),
+    DOUBAO_ENABLE_LEGACY_SIDEBAR_RECOVERY: 'true',
   },
   stdio: ['pipe', 'pipe', 'pipe'],
 })

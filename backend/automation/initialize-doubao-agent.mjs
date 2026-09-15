@@ -5,6 +5,9 @@ const WORK_URL = process.env.DOUBAO_WORK_URL || 'https://www.doubao.com/chat/ski
 const WORK_ORIGIN = new URL(WORK_URL).origin
 const USER_DATA_DIR = process.env.DOUBAO_USER_DATA_DIR || resolve(process.cwd(), '.doubao-profile')
 const PROJECT_NAME = process.env.DOUBAO_PROJECT_NAME || '智灵技能包'
+// 新版任务通过同一受控浏览器的 localStorage 保存每个 Skill 的任务 URL。
+// 历史正文标记仅用于兼容早期任务；默认不扫描侧边栏，避免每个 Skill 打开大量旧会话。
+const ENABLE_LEGACY_SIDEBAR_RECOVERY = process.env.DOUBAO_ENABLE_LEGACY_SIDEBAR_RECOVERY === 'true'
 
 async function readPayload() {
   const chunks = []
@@ -517,7 +520,9 @@ try {
               continue
             }
             const existingSkillTask = await findExistingTask(browserHandle.context, markerPattern)
-              ?? await findExistingTaskInSidebar(page, markerPattern, skillId)
+              ?? (ENABLE_LEGACY_SIDEBAR_RECOVERY
+                ? await findExistingTaskInSidebar(page, markerPattern, skillId)
+                : null)
             if (existingSkillTask) {
               page = existingSkillTask.page
               taskUrls.push(page.url())

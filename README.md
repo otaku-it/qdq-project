@@ -109,3 +109,5 @@ export DOUBAO_CDP_ENDPOINT=http://127.0.0.1:9222
 ```
 
 Worker 位于 `backend/automation/initialize-doubao-agent.mjs`。它只选择“企业”分组中的 Skill，支持一次挂载多个 Skill；浏览器关闭或登录失效时，任务进入 `NEEDS_USER_ACTION`，用户重新登录后可从同一节点继续。成功结果按启动器任务 ID 做进程内幂等缓存，生产环境应改为数据库唯一键和任务回执表。
+
+新版初始化任务会把每个 Skill 的任务 URL 记录在受控浏览器的 localStorage 中，用于扫码后或失败后的幂等恢复。默认不会扫描并逐个打开侧边栏历史会话，避免对每个 Skill 造成大量页面加载。仅在需要恢复旧版“正文中包含启动器标记”的历史任务时，才设置 `DOUBAO_ENABLE_LEGACY_SIDEBAR_RECOVERY=true` 开启该兼容扫描。
